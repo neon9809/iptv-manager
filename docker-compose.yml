@@ -1,0 +1,127 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: iptv-postgres
+    environment:
+      POSTGRES_DB: iptv_manager
+      POSTGRES_USER: iptv_user
+      POSTGRES_PASSWORD: password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U iptv_user -d iptv_manager"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: iptv-redis
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    image: ghcr.io/neon9809/iptv-manager-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: iptv-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - SERVICE_NAME=backend
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - REDIS_URL=redis://redis:6379/0
+      - ANALYSIS_FREQUENCY_MINUTES=45
+      - ANALYSIS_WORKERS=6
+      - ANALYSIS_TIMEOUT_SECONDS=3
+      - FULL_ANALYSIS_TIMEOUT_SECONDS=30
+      - BITRATE_RECORD_DURATION_SECONDS=10
+      - FORGIVENESS_PARAM=10
+      - CHANNEL_ALIAS_URL=https://raw.githubusercontent.com/yaoxieyoulei/YYKM_assets/main/channel_alias.json
+    volumes:
+      - app_data:/app/app/data
+      - app_logo:/app/app/static/logo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    image: ghcr.io/neon9809/iptv-manager-frontend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: iptv-frontend
+    ports:
+      - "8001:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  celery-worker:
+    image: ghcr.io/neon9809/iptv-manager-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: iptv-celery-worker
+    environment:
+      - SERVICE_NAME=celery-worker
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - REDIS_URL=redis://redis:6379/0
+      - ANALYSIS_FREQUENCY_MINUTES=45
+      - ANALYSIS_WORKERS=6
+      - ANALYSIS_TIMEOUT_SECONDS=3
+      - FULL_ANALYSIS_TIMEOUT_SECONDS=30
+      - BITRATE_RECORD_DURATION_SECONDS=10
+      - FORGIVENESS_PARAM=10
+      - CHANNEL_ALIAS_URL=https://raw.githubusercontent.com/yaoxieyoulei/YYKM_assets/main/channel_alias.json
+      - CELERY_LOG_ENABLED=true
+    volumes:
+      - app_data:/app/app/data
+      - app_logo:/app/app/static/logo
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+  celery-beat:
+    image: ghcr.io/neon9809/iptv-manager-backend:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: iptv-celery-beat
+    environment:
+      - SERVICE_NAME=celery-beat
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - REDIS_URL=redis://redis:6379/0
+    volumes:
+      - app_data:/app/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:
+  app_data:
+  app_logo:
