@@ -255,15 +255,6 @@ async def batch_analyze_streams_task(self, task_id: str):
             logger.warning(f"[Task {task_id}] 创建开始通知失败: {ne}")
 
     # 2. 筛选可分析的流并锁定
-    streams_to_analyze = []
-        await notify_task_started(
-            db=db,
-            task_id=task_id,
-            task_name=task_obj.task_name,
-            task_type=task_obj.task_type,
-            total=len(stream_ids),
-        )
-
     async with async_session_maker() as db:
         streams_to_analyze = []
         for sid in stream_ids:
