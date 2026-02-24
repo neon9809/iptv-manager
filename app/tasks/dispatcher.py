@@ -19,24 +19,25 @@ from sqlalchemy import select, func
 from app.core.database import async_session_maker
 from app.models.models import Task
 from app.utils.async_task_runner import run_async
+from app.services.config_service import ConfigService
 
 logger = logging.getLogger(__name__)
-
-# 最大并发任务数（可通过 SystemConfig 动态读取）
-DEFAULT_MAX_CONCURRENT = 4
 
 
 def _task_type_to_notify_params(task_obj: Task) -> dict:
     """根据任务类型返回 notify_analysis_progress 所需的参数"""
     t = task_obj.task_type
     if t == "SINGLE_STREAM_ANALYSIS":
-        return {"task_type": "single", "source_id": None}
+        return {"task_type": "single", "source_id": None, "task_identifier": str(task_obj.id)[:8]}
     elif t in ("BATCH_ANALYSIS", "AUTO_ANALYSIS"):
-        return {"task_type": "full", "source_id": None}
+        return {"task_type": "full", "source_id": None, "task_identifier": str(task_obj.id)[:8]}
     elif t == "SOURCE_REFRESH":
         source_id = task_obj.payload.get("source_id")
-        return {"task_type": "basic", "source_id": source_id}
-    return {"task_type": "full", "source_id": None}
+        return {"task_type": "basic", "source_id": source_id, "task_identifier": str(task_obj.id)[:8]}
+    elif t == "VIDEO_BASIC_ANALYSIS":
+        source_id = task_obj.payload.get("source_id")
+        return {"task_type": "video_basic", "source_id": source_id, "task_identifier": f"video-basic-{source_id}"}
+    return {"task_type": "full", "source_id": None, "task_identifier": str(task_obj.id)[:8]}
 
 
 @shared_task(name="app.tasks.dispatcher.dispatch_tasks")
@@ -46,16 +47,18 @@ async def dispatch_tasks():
     from app.services.notification_service import notify_analysis_progress
 
     async with async_session_maker() as db:
+        max_concurrent = await ConfigService.get_analysis_workers(db)
+
         # 1. 统计当前正在运行和排队中的任务数
         running_count_result = await db.execute(
             select(func.count(Task.id)).where(Task.status.in_(["RUNNING", "QUEUED"]))
         )
         running_count = running_count_result.scalar() or 0
 
-        if running_count >= DEFAULT_MAX_CONCURRENT:
+        if running_count >= max_concurrent:
             return
 
-        slots_available = DEFAULT_MAX_CONCURRENT - running_count
+        slots_available = max_concurrent - running_count
 
         # 2. 按优先级降序、创建时间升序获取待处理任务
         pending_result = await db.execute(
@@ -86,7 +89,7 @@ async def dispatch_tasks():
                         current=0,
                         total=task_obj.total or 1,
                         current_stream_name="",
-                        task_identifier=str(task_obj.id)[:8],
+                        task_identifier=notify_params["task_identifier"],
                         is_queued=True,
                         task_type=notify_params["task_type"],
                         source_id=notify_params["source_id"],
@@ -110,6 +113,12 @@ async def dispatch_tasks():
                 elif task_obj.task_type == "SOURCE_REFRESH":
                     celery_app.send_task(
                         'app.tasks.scheduled.source_refresh_task',
+                        args=[str(task_obj.id)],
+                        queue='refresh',
+                    )
+                elif task_obj.task_type == "VIDEO_BASIC_ANALYSIS":
+                    celery_app.send_task(
+                        'app.tasks.scheduled.video_basic_analysis_task',
                         args=[str(task_obj.id)],
                         queue='refresh',
                     )

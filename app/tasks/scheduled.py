@@ -7,7 +7,16 @@
   - source_refresh_scheduler: 遍历所有订阅源，按各自的 refresh_frequency_hours 创建刷新任务
   - auto_analysis_scheduler: 根据 SystemConfig.analysis_frequency_minutes 创建全局增强分析任务
   - source_refresh_task: 执行单个订阅源的刷新 (由 dispatcher 分发)
+  - video_basic_analysis_task: 执行订阅源视频基本信息分析 (由 dispatcher 分发)
   - log_cleanup_scheduler: 定时清理过期日志
+
+任务优先级说明:
+  - 9: 单个流手动增强分析 (SINGLE_STREAM_ANALYSIS) - 最高优先级
+  - 7: 首次添加订阅源/手动刷新 (SOURCE_REFRESH)
+  - 6: 视频基本信息分析 (VIDEO_BASIC_ANALYSIS)
+  - 5: 手动触发的批量增强分析 (BATCH_ANALYSIS)
+  - 4: 订阅源定时刷新 (SOURCE_REFRESH)
+  - 2: 自动定时增强分析 (AUTO_ANALYSIS) - 最低优先级
 """
 
 import uuid
@@ -232,3 +241,161 @@ async def source_refresh_task(task_id: str):
             task_obj.completed_at = datetime.utcnow()
             await db.commit()
             logger.info(f"[Task {task_id}] Source refresh finished: {task_obj.status}")
+
+
+@shared_task(name="app.tasks.scheduled.video_basic_analysis_task", time_limit=1800, soft_time_limit=1700)
+@run_async
+async def video_basic_analysis_task(task_id: str):
+    """执行订阅源视频基本信息分析 - 由 dispatcher 分发调用
+    
+    分析直播流的视频属性：分辨率、帧率、编码、比特率等
+    """
+    import asyncio
+    from app.services.stream_analyzer import analyze_stream_video_properties
+    from app.services.notification_service import dispatch_notification, CHANNEL_MAINTENANCE
+    from app.services.config_service import ConfigService
+
+    task_uuid = uuid.UUID(task_id)
+    async with async_session_maker() as db:
+        task_obj = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one_or_none()
+        if not task_obj:
+            logger.error(f"[Task {task_id}] 任务不存在。")
+            return
+
+        source_id = task_obj.payload.get("source_id")
+        stream_urls = task_obj.payload.get("stream_urls", [])
+        
+        task_obj.status = "RUNNING"
+        task_obj.started_at = datetime.utcnow()
+        task_obj.total = len(stream_urls)
+        await db.commit()
+
+        source = (await db.execute(select(SubscriptionSource).where(SubscriptionSource.id == source_id))).scalar_one_or_none()
+        source_name = source.nickname if source else f"ID:{source_id}"
+        
+        task_identifier = f"video-basic-{source_id}"
+        total_to_analyze = len(stream_urls)
+        analyzed_count = 0
+        success_count = 0
+
+        await dispatch_notification(
+            db=db,
+            issuer="system",
+            subject=f"[{task_identifier}] 订阅源 {source_name} 视频基本信息分析 (0/{total_to_analyze})",
+            context=f"开始分析视频基本信息: 共 {total_to_analyze} 个直播流",
+            severity="info",
+            channels=[CHANNEL_MAINTENANCE],
+            valid_hours=24,
+            task_identifier=task_identifier,
+            update_existing=True,
+        )
+
+    async with async_session_maker() as db:
+        max_workers = await ConfigService.get_analysis_workers(db)
+    logger.info(f"[Task {task_id}] 并发 Worker 数: {max_workers}")
+    semaphore = asyncio.Semaphore(max_workers)
+    current_active = 0
+    worker_counter = 0
+    lock = asyncio.Lock()
+
+    async def analyze_one(stream_id: str, stream_url: str):
+        nonlocal analyzed_count, success_count, current_active, worker_counter
+        async with semaphore:
+            async with lock:
+                current_active += 1
+                worker_counter += 1
+                worker_no = worker_counter
+            logger.info(f"[Task {task_id}] Worker {current_active}/{max_workers} (#{worker_no}) 开始分析: {stream_url[:50]}...")
+            try:
+                async with async_session_maker() as session:
+                    stream_obj = (await session.execute(select(Stream).where(Stream.id == stream_id))).scalar_one_or_none()
+                    if not stream_obj:
+                        logger.warning(f"[Task {task_id}] 流不存在: {stream_id}")
+                        return
+                    
+                    video_props = await analyze_stream_video_properties(stream_url, timeout=10)
+                    
+                    if video_props.get('analysis_failed'):
+                        stream_obj.video_analysis_failed = True
+                        stream_obj.video_analyzed_at = datetime.utcnow()
+                        logger.warning(f"[Task {task_id}] 视频分析失败 {stream_url[:50]}...")
+                    else:
+                        stream_obj.video_width = video_props.get('video_width')
+                        stream_obj.video_height = video_props.get('video_height')
+                        stream_obj.video_fps = video_props.get('video_fps')
+                        stream_obj.video_codec = video_props.get('video_codec')
+                        stream_obj.video_bit_depth = video_props.get('video_bit_depth')
+                        stream_obj.video_color_profile = video_props.get('video_color_profile')
+                        stream_obj.audio_codec = video_props.get('audio_codec')
+                        stream_obj.video_bitrate_kbps = video_props.get('video_bitrate_kbps')
+                        stream_obj.video_analyzed_at = datetime.utcnow()
+                        stream_obj.video_analysis_failed = False
+                        success_count += 1
+                        logger.info(f"[Task {task_id}] Worker {current_active}/{max_workers} (#{worker_no}) 完成: {stream_url[:50]}...")
+                    
+                    await session.commit()
+            except Exception as e:
+                logger.error(f"[Task {task_id}] 分析失败 {stream_url[:50]}...: {e}")
+                async with async_session_maker() as session:
+                    stream_obj = (await session.execute(select(Stream).where(Stream.id == stream_id))).scalar_one_or_none()
+                    if stream_obj:
+                        stream_obj.video_analysis_failed = True
+                        stream_obj.video_analyzed_at = datetime.utcnow()
+                        await session.commit()
+            finally:
+                analyzed_count += 1
+                async with lock:
+                    current_active -= 1
+
+    try:
+        tasks = [analyze_one(stream_id, stream_url) for stream_id, stream_url in stream_urls]
+        await asyncio.gather(*tasks)
+
+        async with async_session_maker() as db:
+            task_obj = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one()
+            task_obj.status = "SUCCESS"
+            task_obj.result = {"success": success_count, "total": total_to_analyze}
+            task_obj.completed_at = datetime.utcnow()
+            await db.commit()
+
+            await dispatch_notification(
+                db=db,
+                issuer="system",
+                subject=f"[{task_identifier}] 订阅源 {source_name} 视频基本信息分析 ({analyzed_count}/{total_to_analyze})",
+                context=f"分析完成: 成功 {success_count}/{total_to_analyze} 个直播流",
+                severity="success",
+                channels=[CHANNEL_MAINTENANCE],
+                valid_hours=24,
+                task_identifier=task_identifier,
+                update_existing=True,
+            )
+
+            await notify_task_completed(
+                db=db,
+                task_id=task_id,
+                task_name=task_obj.task_name,
+                task_type="VIDEO_BASIC_ANALYSIS",
+                total=total_to_analyze,
+                success=True,
+            )
+
+    except Exception as e:
+        logger.error(f"[Task {task_id}] 视频分析失败: {e}", exc_info=True)
+        async with async_session_maker() as db:
+            task_obj = (await db.execute(select(Task).where(Task.id == task_uuid))).scalar_one()
+            task_obj.status = "FAILED"
+            task_obj.result = {"error": str(e)}
+            task_obj.completed_at = datetime.utcnow()
+            await db.commit()
+
+            await notify_task_completed(
+                db=db,
+                task_id=task_id,
+                task_name=task_obj.task_name,
+                task_type="VIDEO_BASIC_ANALYSIS",
+                total=total_to_analyze,
+                success=False,
+                error_message=str(e),
+            )
+
+    logger.info(f"[Task {task_id}] Video basic analysis finished: success={success_count}, total={total_to_analyze}")

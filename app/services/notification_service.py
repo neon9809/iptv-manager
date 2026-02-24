@@ -163,6 +163,8 @@ async def notify_analysis_progress(
     try:
         if task_type == "basic" and source_id:
             task_display_name = f"订阅源 {source_id} 视频基本信息分析"
+        elif task_type == "video_basic" and source_id:
+            task_display_name = f"订阅源 {source_id} 视频基本信息分析"
         elif task_type == "full":
             task_display_name = "直播流质量增强分析"
         elif task_type == "single":
@@ -231,6 +233,8 @@ async def notify_task_status(
         task_display_name = "定时增强分析"
     elif task_type == "SOURCE_REFRESH":
         task_display_name = "订阅源刷新"
+    elif task_type == "VIDEO_BASIC_ANALYSIS":
+        task_display_name = "视频基本信息分析"
     else:
         task_display_name = task_name or "分析任务"
 

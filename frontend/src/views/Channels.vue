@@ -149,7 +149,10 @@
                 </el-table-column>
                 <el-table-column label="视频" width="180">
                   <template #default="{ row }">
-                    <span v-if="row.video_width">
+                    <span v-if="row.video_analysis_failed">
+                      <el-tag size="small" type="danger">分析失败</el-tag>
+                    </span>
+                    <span v-else-if="row.video_width">
                       {{ row.video_width }}×{{ row.video_height }}
                       <span v-if="row.video_fps"> @{{ row.video_fps }}fps</span>
                       <br>
@@ -162,6 +165,7 @@
                 <el-table-column label="音频" width="80">
                   <template #default="{ row }">
                     <el-tag v-if="row.audio_codec" size="small" type="success">{{ row.audio_codec }}</el-tag>
+                    <span v-else-if="row.video_analysis_failed">-</span>
                     <span v-else>未分析</span>
                   </template>
                 </el-table-column>
@@ -170,6 +174,7 @@
                     <el-tag v-if="row.latency_ms" size="small" type="success">
                       {{ row.latency_ms }}ms
                     </el-tag>
+                    <el-tag v-else-if="row.enhanced_analysis_failed" size="small" type="danger">失败</el-tag>
                     <span v-else>未测试</span>
                   </template>
                 </el-table-column>
@@ -178,6 +183,7 @@
                     <el-tag v-if="row.bitrate_kbps" size="small" type="warning">
                       {{ row.bitrate_kbps }}kbps
                     </el-tag>
+                    <span v-else-if="row.enhanced_analysis_failed">-</span>
                     <span v-else>未测试</span>
                   </template>
                 </el-table-column>
@@ -189,6 +195,7 @@
                       :status="row.stability_score > 80 ? 'success' : row.stability_score > 50 ? 'warning' : 'exception'"
                       :stroke-width="8"
                     />
+                    <span v-else-if="row.enhanced_analysis_failed">-</span>
                     <span v-else>未测试</span>
                   </template>
                 </el-table-column>

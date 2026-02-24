@@ -73,10 +73,12 @@ class Stream(Base):
     audio_codec: Mapped[str | None] = mapped_column(String(32))
     video_analyzed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)
     video_bitrate_kbps: Mapped[int | None] = mapped_column(Integer)
+    video_analysis_failed: Mapped[bool] = mapped_column(Boolean, default=False)
 
     unreachable_count: Mapped[int] = mapped_column(Integer, default=0)
     active: Mapped[str] = mapped_column(String(10), default="auto")
     last_analysis_time: Mapped[datetime | None] = mapped_column(TIMESTAMP)
+    enhanced_analysis_failed: Mapped[bool] = mapped_column(Boolean, default=False)
     first_discovered_at: Mapped[datetime] = mapped_column(TIMESTAMP, default=datetime.utcnow)
     current_task_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"))
 
@@ -100,7 +102,7 @@ class SubscriptionSource(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     nickname: Mapped[str] = mapped_column(String(255), nullable=False)
     url: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
-    refresh_frequency_hours: Mapped[int] = mapped_column(Integer, default=2)
+    refresh_frequency_hours: Mapped[int] = mapped_column(Integer, default=6)
     last_refresh_time: Mapped[datetime | None] = mapped_column(TIMESTAMP)
     last_refresh_status: Mapped[str | None] = mapped_column(String(20))
     stream_count: Mapped[int] = mapped_column(Integer, default=0)

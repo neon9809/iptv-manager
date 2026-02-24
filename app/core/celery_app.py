@@ -20,6 +20,7 @@ celery_app.conf.task_routes = {
     'app.tasks.analysis.analyze_stream_task': {'queue': 'analysis-high'},
     'app.tasks.analysis.batch_analyze_streams_task': {'queue': 'analysis'},
     'app.tasks.scheduled.source_refresh_task': {'queue': 'refresh'},
+    'app.tasks.scheduled.video_basic_analysis_task': {'queue': 'refresh'},
     'app.tasks.dispatcher.dispatch_tasks': {'queue': 'dispatcher'},
     'app.tasks.scheduled.source_refresh_scheduler': {'queue': 'dispatcher'},
     'app.tasks.scheduled.auto_analysis_scheduler': {'queue': 'dispatcher'},

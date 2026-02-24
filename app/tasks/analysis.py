@@ -19,6 +19,7 @@ from sqlalchemy import select, update
 from app.core.database import async_session_maker
 from app.models.models import Stream, Task
 from app.services.stream_analyzer import analyze_stream_full, analyze_stream_quick
+from app.services.config_service import ConfigService
 from app.services.notification_service import (
     notify_task_started,
     notify_task_progress,
@@ -285,18 +286,28 @@ async def batch_analyze_streams_task(self, task_id: str):
         return
 
     # 3. 使用信号量进行并发控制
-    max_workers = 4
+    async with async_session_maker() as db:
+        max_workers = await ConfigService.get_analysis_workers(db)
+    logger.info(f"[Task {task_id}] 并发 Worker 数: {max_workers}")
     semaphore = asyncio.Semaphore(max_workers)
     completed_count = 0
     success_count = 0
     failed_count = 0
+    current_active = 0
+    worker_counter = 0
+    lock = asyncio.Lock()
     ids_only = [s[0] for s in streams_to_analyze]
     total = len(streams_to_analyze)
     total_count = len(streams_to_analyze)
 
     async def analyze_one(sid: str, sname: str):
-        nonlocal completed_count, success_count, failed_count
+        nonlocal completed_count, success_count, failed_count, current_active, worker_counter
         async with semaphore:
+            async with lock:
+                current_active += 1
+                worker_counter += 1
+                worker_no = worker_counter
+            logger.info(f"[Task {task_id}] Worker {current_active}/{max_workers} (#{worker_no}) 开始分析: {sname}")
             try:
                 async with async_session_maker() as session:
                     if mode == "quick":
@@ -304,11 +315,14 @@ async def batch_analyze_streams_task(self, task_id: str):
                     else:
                         await analyze_stream_full(session, sid)
                     success_count += 1
+                    logger.info(f"[Task {task_id}] Worker {current_active}/{max_workers} (#{worker_no}) 完成: {sname}")
             except Exception as e:
                 logger.error(f"[Task {task_id}] 分析流 {sid} 失败: {e}")
                 failed_count += 1
             finally:
                 completed_count += 1
+                async with lock:
+                    current_active -= 1
                 # 更新进度到 Task 表
                 try:
                     async with async_session_maker() as session:
@@ -347,7 +361,6 @@ async def batch_analyze_streams_task(self, task_id: str):
 
     # 执行所有分析
     tasks = [analyze_one(sid, sname) for sid, sname in streams_to_analyze]
-    tasks = [analyze_one(sid) for sid in streams_to_analyze]
     await asyncio.gather(*tasks)
 
     async with async_session_maker() as db:

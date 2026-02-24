@@ -54,9 +54,11 @@ class StreamResponse(StreamBase):
     audio_codec: Optional[str] = None
     video_analyzed_at: Optional[datetime] = None
     video_bitrate_kbps: Optional[int] = None
+    video_analysis_failed: bool = False
     unreachable_count: int
     active: str
     last_analysis_time: Optional[datetime] = None
+    enhanced_analysis_failed: bool = False
     first_discovered_at: datetime
     created_at: datetime
     updated_at: datetime

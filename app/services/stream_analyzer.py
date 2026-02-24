@@ -495,12 +495,15 @@ async def analyze_stream_full(db: AsyncSession, stream_id: str) -> dict:
     
     stream_url = stream.url
     
-    latency = await analyze_stream_latency(stream_url, settings.ANALYSIS_TIMEOUT_SECONDS)
-    bitrate = await analyze_stream_bitrate(stream_url, timeout=settings.FULL_ANALYSIS_TIMEOUT_SECONDS)
-    stability = await analyze_stream_stability(stream_url, settings.ANALYSIS_TIMEOUT_SECONDS)
+    analysis_timeout = await ConfigService.get_analysis_timeout_seconds(db)
+    full_analysis_timeout = ConfigService.get_full_analysis_timeout_seconds()
+    
+    latency = await analyze_stream_latency(stream_url, analysis_timeout)
+    bitrate = await analyze_stream_bitrate(stream_url, timeout=full_analysis_timeout)
+    stability = await analyze_stream_stability(stream_url, analysis_timeout)
     video_props = await analyze_stream_video_properties(
         stream_url, 
-        timeout=settings.FULL_ANALYSIS_TIMEOUT_SECONDS, 
+        timeout=full_analysis_timeout, 
         calculate_bitrate=True
     )
     
@@ -523,17 +526,24 @@ async def analyze_stream_full(db: AsyncSession, stream_id: str) -> dict:
         stream.latency_ms = latency
         stream.bitrate_kbps = final_bitrate
         stream.stability_score = stability.get("stability_score")
+        stream.enhanced_analysis_failed = False
+    else:
+        stream.enhanced_analysis_failed = True
     _update_stream_reachability(stream, latency)
     
     if video_props:
-        stream.video_width = video_props.get('video_width')
-        stream.video_height = video_props.get('video_height')
-        stream.video_fps = video_props.get('video_fps')
-        stream.video_codec = video_props.get('video_codec')
-        stream.video_bit_depth = video_props.get('video_bit_depth')
-        stream.video_color_profile = video_props.get('video_color_profile')
-        stream.audio_codec = video_props.get('audio_codec')
-        stream.video_bitrate_kbps = video_bitrate_from_props
+        if video_props.get('analysis_failed'):
+            stream.video_analysis_failed = True
+        else:
+            stream.video_width = video_props.get('video_width')
+            stream.video_height = video_props.get('video_height')
+            stream.video_fps = video_props.get('video_fps')
+            stream.video_codec = video_props.get('video_codec')
+            stream.video_bit_depth = video_props.get('video_bit_depth')
+            stream.video_color_profile = video_props.get('video_color_profile')
+            stream.audio_codec = video_props.get('audio_codec')
+            stream.video_bitrate_kbps = video_bitrate_from_props
+            stream.video_analysis_failed = False
         stream.video_analyzed_at = datetime.utcnow()
     
     await db.commit()
@@ -556,7 +566,8 @@ async def analyze_stream_quick(db: AsyncSession, stream_id: str) -> dict:
     if not stream:
         return {"error": "Stream not found"}
     
-    latency = await analyze_stream_latency(stream.url, settings.ANALYSIS_TIMEOUT_SECONDS)
+    analysis_timeout = await ConfigService.get_analysis_timeout_seconds(db)
+    latency = await analyze_stream_latency(stream.url, analysis_timeout)
     
     history = AnalysisHistory(
         stream_id=stream.id,
@@ -566,6 +577,11 @@ async def analyze_stream_quick(db: AsyncSession, stream_id: str) -> dict:
     db.add(history)
     
     _update_stream_reachability(stream, latency)
+    
+    if latency is not None:
+        stream.enhanced_analysis_failed = False
+    else:
+        stream.enhanced_analysis_failed = True
     
     await db.commit()
     

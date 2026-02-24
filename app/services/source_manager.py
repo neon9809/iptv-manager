@@ -5,12 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 from app.models.models import SubscriptionSource, Stream
 from app.utils.m3u_parser import parse_m3u_from_url
-from app.services.notification_service import (
-    notify_source_refresh_failed,
-    dispatch_notification,
-    CHANNEL_MAINTENANCE,
-)
-from app.services.stream_analyzer import analyze_stream_video_properties
+from app.services.notification_service import notify_source_refresh_failed
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +58,12 @@ async def add_subscription_source(
     refresh_frequency_hours: int = 2,
     analyze_video: bool = True
 ) -> tuple[SubscriptionSource, dict]:
+    existing = await db.execute(
+        select(SubscriptionSource).where(SubscriptionSource.url == url)
+    )
+    if existing.scalar_one_or_none():
+        raise ValueError("该订阅源 URL 已存在")
+    
     source = SubscriptionSource(
         nickname=nickname,
         url=url,
@@ -104,10 +105,10 @@ async def refresh_source(db: AsyncSession, source_id: int, analyze_video: bool =
                 if source.id not in existing_stream.source_ids:
                     existing_stream.source_ids = existing_stream.source_ids + [source.id]
                 if stream_data.get('name') and not existing_stream.name:
-                    existing_stream.name = stream_data['name']
+                    existing_stream.name = stream_data.get('name')
                 
                 if analyze_video and not existing_stream.video_width:
-                    streams_to_analyze.append((existing_stream, stream_data['url']))
+                    streams_to_analyze.append((str(existing_stream.id), stream_data['url']))
                 
                 updated_count += 1
             else:
@@ -123,56 +124,9 @@ async def refresh_source(db: AsyncSession, source_id: int, analyze_video: bool =
                 await db.flush()
                 
                 if analyze_video:
-                    streams_to_analyze.append((new_stream, stream_data['url']))
+                    streams_to_analyze.append((str(new_stream.id), stream_data['url']))
                 
                 new_count += 1
-        
-        if analyze_video and streams_to_analyze:
-            task_identifier = f"video-basic-{source_id}"
-            total_to_analyze = len(streams_to_analyze)
-            analyzed_count = 0
-            
-            await dispatch_notification(
-                db=db,
-                issuer="system",
-                subject=f"[{task_identifier}] 订阅源 {source.nickname} 视频基本信息分析 (0/{total_to_analyze})",
-                context=f"开始分析视频基本信息: 共 {total_to_analyze} 个直播流",
-                severity="info",
-                channels=[CHANNEL_MAINTENANCE],
-                valid_hours=24,
-                task_identifier=task_identifier,
-                update_existing=True,
-            )
-            
-            for stream_obj, stream_url in streams_to_analyze:
-                try:
-                    video_props = await analyze_stream_video_properties(stream_url, timeout=5)
-                    stream_obj.video_width = video_props.get('video_width')
-                    stream_obj.video_height = video_props.get('video_height')
-                    stream_obj.video_fps = video_props.get('video_fps')
-                    stream_obj.video_codec = video_props.get('video_codec')
-                    stream_obj.video_bit_depth = video_props.get('video_bit_depth')
-                    stream_obj.video_color_profile = video_props.get('video_color_profile')
-                    stream_obj.audio_codec = video_props.get('audio_codec')
-                    stream_obj.video_bitrate_kbps = video_props.get('video_bitrate_kbps')
-                    stream_obj.video_analyzed_at = datetime.utcnow()
-                except Exception as e:
-                    logger.warning(f"Failed to analyze video properties for {stream_url}: {e}")
-                
-                analyzed_count += 1
-                
-                if analyzed_count % 5 == 0 or analyzed_count == total_to_analyze:
-                    await dispatch_notification(
-                        db=db,
-                        issuer="system",
-                        subject=f"[{task_identifier}] 订阅源 {source.nickname} 视频基本信息分析 ({analyzed_count}/{total_to_analyze})",
-                        context=f"分析进度: 已分析 {analyzed_count}/{total_to_analyze} 个直播流",
-                        severity="info" if analyzed_count < total_to_analyze else "success",
-                        channels=[CHANNEL_MAINTENANCE],
-                        valid_hours=24,
-                        task_identifier=task_identifier,
-                        update_existing=True,
-                    )
         
         await db.flush()
         
@@ -191,7 +145,8 @@ async def refresh_source(db: AsyncSession, source_id: int, analyze_video: bool =
             "status": "success",
             "new_streams": new_count,
             "updated_streams": updated_count,
-            "total_streams": stream_count
+            "total_streams": stream_count,
+            "streams_to_analyze": streams_to_analyze,
         }
         
     except Exception as e:

@@ -38,6 +38,9 @@
                   {{ source.stream_count }}
                 </el-descriptions-item>
                 <el-descriptions-item label="操作">
+                  <el-button size="small" @click="editSource(source)">
+                    编辑
+                  </el-button>
                   <el-button size="small" @click="refreshSource(source.id)">
                     刷新
                   </el-button>
@@ -61,13 +64,32 @@
           <el-input v-model="newSource.nickname" placeholder="自定义名称" />
         </el-form-item>
         <el-form-item label="刷新频率">
-          <el-input-number v-model="newSource.refresh_frequency_hours" :min="1" :max="24" />
+          <el-input-number v-model="newSource.refresh_frequency_hours" :min="1" :max="168" />
           <span style="margin-left: 10px">小时</span>
         </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="showAddDialog = false">取消</el-button>
         <el-button type="primary" @click="addSource" :loading="loading">确定</el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="showEditDialog" title="编辑订阅源" width="500px">
+      <el-form :model="editingSource" label-width="100px">
+        <el-form-item label="订阅源URL">
+          <el-input v-model="editingSource.url" disabled />
+        </el-form-item>
+        <el-form-item label="显示名称">
+          <el-input v-model="editingSource.nickname" placeholder="自定义名称" />
+        </el-form-item>
+        <el-form-item label="刷新频率">
+          <el-input-number v-model="editingSource.refresh_frequency_hours" :min="1" :max="168" />
+          <span style="margin-left: 10px">小时</span>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="showEditDialog = false">取消</el-button>
+        <el-button type="primary" @click="updateSource" :loading="loading">确定</el-button>
       </template>
     </el-dialog>
   </div>
@@ -81,12 +103,20 @@ import { sourcesApi, streamsApi } from '../api'
 
 const sources = ref<any[]>([])
 const showAddDialog = ref(false)
+const showEditDialog = ref(false)
 const loading = ref(false)
 
 const newSource = ref({
   url: '',
   nickname: '',
-  refresh_frequency_hours: 2,
+  refresh_frequency_hours: 6,
+})
+
+const editingSource = ref({
+  id: 0,
+  url: '',
+  nickname: '',
+  refresh_frequency_hours: 6,
 })
 
 const loadSources = async () => {
@@ -123,7 +153,7 @@ const addSource = async () => {
     await sourcesApi.create(newSource.value)
     ElMessage.success('添加成功')
     showAddDialog.value = false
-    newSource.value = { url: '', nickname: '', refresh_frequency_hours: 2 }
+    newSource.value = { url: '', nickname: '', refresh_frequency_hours: 6 }
     await loadSources()
   } catch (error: any) {
     ElMessage.error(error.response?.data?.detail || '添加失败')
@@ -139,6 +169,33 @@ const refreshSource = async (id: number) => {
     await loadSources()
   } catch (error) {
     ElMessage.error('刷新失败')
+  }
+}
+
+const editSource = (source: any) => {
+  editingSource.value = {
+    id: source.id,
+    url: source.url,
+    nickname: source.nickname,
+    refresh_frequency_hours: source.refresh_frequency_hours,
+  }
+  showEditDialog.value = true
+}
+
+const updateSource = async () => {
+  loading.value = true
+  try {
+    await sourcesApi.update(editingSource.value.id, {
+      nickname: editingSource.value.nickname,
+      refresh_frequency_hours: editingSource.value.refresh_frequency_hours,
+    })
+    ElMessage.success('更新成功')
+    showEditDialog.value = false
+    await loadSources()
+  } catch (error: any) {
+    ElMessage.error(error.response?.data?.detail || '更新失败')
+  } finally {
+    loading.value = false
   }
 }
 

@@ -132,22 +132,24 @@ async def create_source(
     source: SubscriptionSourceCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """创建订阅源并创建一个高优先级的刷新 Task"""
+    """创建订阅源并创建刷新任务和视频分析任务"""
     is_valid, message = await source_manager.validate_subscription_source(source.url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=message)
 
-    new_source, _ = await source_manager.add_subscription_source(
-        db,
-        source.nickname,
-        source.url,
-        source.refresh_frequency_hours,
-        analyze_video=True,
-    )
+    try:
+        new_source, result = await source_manager.add_subscription_source(
+            db,
+            source.nickname,
+            source.url,
+            source.refresh_frequency_hours,
+            analyze_video=True,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     await channel_matcher.auto_match_channels(db)
 
-    # 创建首次刷新任务 (优先级 7)
     refresh_task = Task(
         task_name=f"Initial Refresh: {new_source.nickname}",
         task_type="SOURCE_REFRESH",
@@ -155,6 +157,20 @@ async def create_source(
         payload={"source_id": new_source.id},
     )
     db.add(refresh_task)
+
+    streams_to_analyze = result.get("streams_to_analyze", [])
+    if streams_to_analyze:
+        video_task = Task(
+            task_name=f"Video Analysis: {new_source.nickname}",
+            task_type="VIDEO_BASIC_ANALYSIS",
+            priority=6,
+            payload={
+                "source_id": new_source.id,
+                "stream_urls": streams_to_analyze,
+            },
+        )
+        db.add(video_task)
+
     await db.commit()
 
     return new_source
@@ -280,9 +296,11 @@ async def get_streams(
         audio_codec=s.audio_codec,
         video_analyzed_at=s.video_analyzed_at,
         video_bitrate_kbps=s.video_bitrate_kbps,
+        video_analysis_failed=s.video_analysis_failed,
         unreachable_count=s.unreachable_count,
         active=s.active,
         last_analysis_time=s.last_analysis_time,
+        enhanced_analysis_failed=s.enhanced_analysis_failed,
         first_discovered_at=s.first_discovered_at,
         created_at=s.created_at,
         updated_at=s.updated_at,
@@ -885,6 +903,11 @@ async def import_config(
     db: AsyncSession = Depends(get_db),
 ):
     """从 JSON 文件恢复配置"""
+    from app.models.models import SubscriptionSource
+    
+    restored_sources = []
+    skipped_sources = []
+    failed_sources = []
     
     if "system_config" in config_data:
         system_config = (await db.execute(select(SystemConfig).limit(1))).scalar_one_or_none()
@@ -920,9 +943,69 @@ async def import_config(
                     if key != "channel_key" and hasattr(config, key):
                         setattr(config, key, value)
     
+    if "subscription_sources" in config_data:
+        for source_data in config_data["subscription_sources"]:
+            url = source_data.get("url")
+            nickname = source_data.get("nickname")
+            refresh_frequency_hours = source_data.get("refresh_frequency_hours", 2)
+            
+            if not url or not nickname:
+                failed_sources.append({"nickname": nickname or "未知", "reason": "缺少必要字段"})
+                continue
+            
+            existing = (await db.execute(
+                select(SubscriptionSource).where(SubscriptionSource.url == url)
+            )).scalar_one_or_none()
+            
+            if existing:
+                skipped_sources.append({"nickname": nickname, "reason": "订阅源已存在"})
+                continue
+            
+            is_valid, message = await source_manager.validate_subscription_source(url)
+            if not is_valid:
+                failed_sources.append({"nickname": nickname, "reason": message})
+                continue
+            
+            try:
+                new_source, result = await source_manager.add_subscription_source(
+                    db,
+                    nickname,
+                    url,
+                    refresh_frequency_hours,
+                    analyze_video=True,
+                )
+            except ValueError as e:
+                skipped_sources.append({"nickname": nickname, "reason": str(e)})
+                continue
+            
+            await channel_matcher.auto_match_channels(db)
+            
+            streams_to_analyze = result.get("streams_to_analyze", [])
+            if streams_to_analyze:
+                video_task = Task(
+                    task_name=f"Video Analysis: {new_source.nickname}",
+                    task_type="VIDEO_BASIC_ANALYSIS",
+                    priority=6,
+                    payload={
+                        "source_id": new_source.id,
+                        "stream_urls": streams_to_analyze,
+                    },
+                )
+                db.add(video_task)
+            
+            restored_sources.append(nickname)
+    
     await db.commit()
     
-    return {"status": "success", "message": "配置已恢复"}
+    return {
+        "status": "success",
+        "message": "配置已恢复",
+        "details": {
+            "restored_sources": restored_sources,
+            "skipped_sources": skipped_sources,
+            "failed_sources": failed_sources,
+        }
+    }
 
 
 from app.models.models import SubscriptionSource

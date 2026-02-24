@@ -21,7 +21,7 @@
             <el-row :gutter="16">
               <el-col :span="12">
                 <el-form-item label="分析频率">
-                  <el-input-number v-model="settings.analysisFrequency" :min="15" :max="120" class="full-width" />
+                  <el-input-number v-model="settings.analysisFrequency" :min="15" :max="1440" class="full-width" />
                   <div class="form-tip">分钟</div>
                 </el-form-item>
               </el-col>
@@ -645,8 +645,28 @@ const importConfig = async (file: File) => {
       body: JSON.stringify(configData)
     })
     if (!response.ok) throw new Error('导入失败')
-    ElMessage.success('配置导入成功，正在刷新...')
-    setTimeout(() => { window.location.reload() }, 1000)
+    const result = await response.json()
+    
+    const details = result.details || {}
+    const messages = []
+    
+    if (details.restored_sources?.length > 0) {
+      messages.push(`已恢复 ${details.restored_sources.length} 个订阅源: ${details.restored_sources.join(', ')}`)
+    }
+    if (details.skipped_sources?.length > 0) {
+      messages.push(`跳过 ${details.skipped_sources.length} 个已存在的订阅源: ${details.skipped_sources.map((s: any) => s.nickname).join(', ')}`)
+    }
+    if (details.failed_sources?.length > 0) {
+      messages.push(`失败 ${details.failed_sources.length} 个: ${details.failed_sources.map((s: any) => `${s.nickname}(${s.reason})`).join(', ')}`)
+    }
+    
+    if (messages.length > 0) {
+      ElMessage.success(messages.join('；'))
+    } else {
+      ElMessage.success('配置导入成功')
+    }
+    
+    setTimeout(() => { window.location.reload() }, 1500)
   } catch (error) {
     ElMessage.error('配置导入失败，请检查文件格式')
   } finally {
