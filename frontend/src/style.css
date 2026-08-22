@@ -1,79 +1,242 @@
+/* ============================================================
+   IPTV Manager — Apple-style design tokens & global styles
+   依据 design.md（Apple Design）准则：
+   - §12 材料：半透明铬层 + backdrop-filter，内容从其下滚过
+   - §15 排版：系统字体、字号专属字距（大字收紧/小字微放）、
+     行高与字号反向联动、层级由 字重+字号+行高 三件套构成
+   - §1 响应：按压即时反馈（:active，pointer-down 即刻生效）
+   - §11 流畅度：只动 transform / opacity，compositor-friendly
+   - §14 可访问性：prefers-reduced-motion / reduced-transparency /
+     prefers-contrast 三信号独立响应
+   ============================================================ */
+
 :root {
-  font-family: system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+  /* ---- 材料与表面（§12）---- */
+  --surface-blur: saturate(180%) blur(20px);
+  --chrome-bg-light: rgba(255, 255, 255, 0.72);
+  --chrome-bg-dark: rgba(28, 28, 30, 0.72);
+  --chrome-border-light: rgba(255, 255, 255, 0.5);   /* 亮顶边 = 光照在材料上 */
+  --chrome-border-dark: rgba(255, 255, 255, 0.08);
+
+  /* ---- 层级阴影：大面更厚，小件更轻（§12）---- */
+  --shadow-window:
+    0 12px 40px rgba(0, 0, 0, 0.14),
+    0 2px 8px rgba(0, 0, 0, 0.08);
+  --shadow-card:
+    0 4px 16px rgba(0, 0, 0, 0.07),
+    0 1px 3px rgba(0, 0, 0, 0.05);
+  --shadow-raised:
+    0 8px 24px rgba(0, 0, 0, 0.10),
+    0 2px 6px rgba(0, 0, 0, 0.06);
+
+  /* ---- 动效令牌（§4：默认临界阻尼，无过冲）---- */
+  --ease-standard: cubic-bezier(0.25, 0.1, 0.25, 1);
+  --dur-fast: 120ms;   /* 按压反馈 */
+  --dur-base: 240ms;   /* 常规过渡 */
+
+  /* ---- 圆角 ---- */
+  --radius-card: 14px;
+  --radius-chip: 10px;
 
   color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #242424;
+}
 
-  font-synthesis: none;
+/* ============================================================
+   基础排版（§15）
+   ============================================================ */
+
+html {
+  font: 100%/1.5 -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+        'Segoe UI', system-ui, sans-serif;
+  font-optical-sizing: auto;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}
-
-a {
-  font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
-}
-a:hover {
-  color: #535bf2;
+  scroll-behavior: smooth;
 }
 
 body {
   margin: 0;
-  display: flex;
-  place-items: center;
-  min-width: 320px;
   min-height: 100vh;
+  background: #f5f5f7;               /* Apple 中性灰底，非纯白 */
+  color: #1d1d1f;
+  transition: background-color var(--dur-base) var(--ease-standard);
 }
 
-h1 {
-  font-size: 3.2em;
+@media (prefers-color-scheme: dark) {
+  body {
+    background: #000;
+    color: #f5f5f7;
+  }
+}
+
+/* 大标题：负字距 + 紧行高；随视口光学缩放 */
+h1, h2, h3 {
+  letter-spacing: -0.02em;
   line-height: 1.1;
+  font-weight: 700;
+  text-wrap: balance;
 }
 
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #1a1a1a;
-  cursor: pointer;
-  transition: border-color 0.25s;
-}
-button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+/* 小号辅助文字：正字距提升可读性（§15） */
+.small-caps-label,
+.stat-sub-label,
+.form-tip,
+.empty-tip {
+  letter-spacing: 0.01em;
 }
 
-.card {
-  padding: 2em;
+/* ============================================================
+   Element Plus 主题对齐 —— 让组件库融入 Apple 视觉语言
+   ============================================================ */
+
+:root {
+  --el-color-primary: #0071e3;       /* Apple 蓝 */
+  --el-color-primary-light-3: #4d9df0;
+  --el-color-primary-light-5: #80b9f5;
+  --el-color-primary-light-7: #b3d5fa;
+  --el-color-primary-light-8: #cce3fc;
+  --el-color-primary-light-9: #e6f1fd;
+  --el-color-primary-dark-2: #005bb8;
+  --el-color-success: #34c759;
+  --el-color-warning: #ff9500;
+  --el-color-danger: #ff3b30;
+  --el-color-error: #ff3b30;
+  --el-border-radius-base: 10px;
+  --el-border-radius-small: 8px;
+  --el-font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text',
+                    'Segoe UI', system-ui, sans-serif;
 }
 
-#app {
-  max-width: 1280px;
-  margin: 0 auto;
-  padding: 2rem;
-  text-align: center;
-}
-
-@media (prefers-color-scheme: light) {
+@media (prefers-color-scheme: dark) {
   :root {
-    color: #213547;
-    background-color: #ffffff;
+    --el-bg-color: #1c1c1e;
+    --el-bg-color-overlay: #2c2c2e;
+    --el-fill-color-light: rgba(255, 255, 255, 0.06);
+    --el-fill-color-lighter: rgba(255, 255, 255, 0.04);
+    --el-text-color-primary: #f5f5f7;
+    --el-text-color-regular: rgba(235, 235, 245, 0.72);
+    --el-text-color-secondary: rgba(235, 235, 245, 0.48);
+    --el-border-color: rgba(255, 255, 255, 0.12);
+    --el-border-color-light: rgba(255, 255, 255, 0.08);
+    --el-border-color-lighter: rgba(255, 255, 255, 0.06);
   }
-  a:hover {
-    color: #747bff;
+}
+
+/* 卡片：更大圆角 + 更柔和的分层阴影（§12 面越大越厚） */
+.el-card {
+  border-radius: var(--radius-card) !important;
+  border: none !important;
+  box-shadow: var(--shadow-card) !important;
+  transition: box-shadow var(--dur-base) var(--ease-standard),
+              transform var(--dur-base) var(--ease-standard);
+}
+
+.el-card.is-hover-shadow:hover {
+  box-shadow: var(--shadow-raised) !important;
+}
+
+/* 按钮：按压即时反馈（§1 — pointer-down 生效，不等 release） */
+.el-button {
+  transition: transform var(--dur-fast) ease-out,
+              box-shadow var(--dur-fast) ease-out,
+              background-color var(--dur-fast) ease-out;
+  will-change: transform;
+}
+
+.el-button:active {
+  transform: scale(0.97);            /* 即时缩放 = 直接操纵感 */
+}
+
+/* 主按钮带轻量投影，hover 抬升 */
+.el-button--primary:not(.is-text):not(.is-link) {
+  box-shadow: 0 1px 3px rgba(0, 113, 227, 0.35);
+}
+.el-button--primary:not(.is-text):not(.is-link):hover {
+  box-shadow: 0 4px 12px rgba(0, 113, 227, 0.40);
+  transform: translateY(-1px);
+}
+.el-button--primary:not(.is-text):not(.is-link):active {
+  transform: scale(0.97) translateY(0);
+  box-shadow: 0 1px 2px rgba(0, 113, 227, 0.30);
+}
+
+/* 对话框：材料化入场（§12 — blur+scale 同动，而非单纯淡入） */
+.el-dialog {
+  border-radius: var(--radius-card) !important;
+  box-shadow: var(--shadow-window) !important;
+}
+
+.el-overlay {
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+/* 输入控件圆角统一 */
+.el-input__wrapper,
+.el-select__wrapper,
+.el-input-number,
+.el-textarea__inner {
+  border-radius: var(--radius-chip) !important;
+}
+
+/* 标签页指示条平滑跟随 */
+.el-menu--horizontal .el-menu-item {
+  transition: color var(--dur-fast) ease-out,
+              background-color var(--dur-fast) ease-out;
+}
+
+/* 滚动条弱化，贴合 macOS 质感 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb {
+  background: rgba(0, 0, 0, 0.18);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover { background: rgba(0, 0, 0, 0.28); }
+@media (prefers-color-scheme: dark) {
+  ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.18); }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+}
+
+/* ============================================================
+   可访问性三信号（§14）—— 相互独立，按需响应
+   ============================================================ */
+
+/* 减少动态：滑入/弹跳 → 短交叉淡化，去掉位移与过冲 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
-  button {
-    background-color: #f9f9f9;
+  html { scroll-behavior: auto; }
+  .el-button:active { transform: none; }
+}
+
+/* 减少透明度：材料变实——提高不透明度、撤掉模糊 */
+@media (prefers-reduced-transparency: reduce) {
+  .app-header, .app-footer {
+    background: #ffffff;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+  @media (prefers-color-scheme: dark) {
+    .app-header, .app-footer { background: #1c1c1e; }
+  }
+}
+
+/* 提高对比度：近实底 + 明确描边 */
+@media (prefers-contrast: more) {
+  .app-header, .app-footer {
+    background: #ffffff;
+    border-bottom: 1px solid #86868b;
+  }
+  .el-card { border: 1px solid #86868b !important; }
+  @media (prefers-color-scheme: dark) {
+    .app-header, .app-footer {
+      background: #1c1c1e;
+      border-bottom: 1px solid #98989d;
+    }
+    .el-card { border: 1px solid #98989d !important; }
   }
 }

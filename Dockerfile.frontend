@@ -4,15 +4,23 @@
 # ============================================================
 
 # Stage 1: Build (使用固定平台，静态文件平台无关)
-FROM --platform=$BUILDPLATFORM node:20-alpine AS builder
+# 注意：Node 22+ —— corepack 拉取的最新版 pnpm 依赖 node:sqlite（Node 22.13+ 才有），
+# Node 20 会在 pnpm install 阶段报 ERR_UNKNOWN_BUILTIN_MODULE
+FROM --platform=$BUILDPLATFORM node:22-alpine AS builder
 
 WORKDIR /app
+
+# CI 环境：pnpm 的 deps-status 检查在需要清理 node_modules 时
+# 会请求 TTY 确认，无 TTY 的容器环境中必须设 CI=true 才能自动继续
+ENV CI=true
 
 # 接收目标平台参数
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM
 
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# pnpm-workspace.yaml 含 allowBuilds 构建脚本白名单，必须与 lockfile 一起先复制，
+# 否则 pnpm install 会因 esbuild/vue-demi 的 postinstall 被拦截而失败
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 
 COPY frontend/ .

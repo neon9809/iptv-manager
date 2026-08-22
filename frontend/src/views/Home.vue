@@ -300,11 +300,14 @@ onUnmounted(() => {
   padding: 16px 8px;
 }
 
+/* 大号数字：负字距 + 紧行高（§15 大字收紧） */
 .stat-value {
-  font-size: 28px;
+  font-size: 32px;
   font-weight: 700;
+  letter-spacing: -0.02em;
+  line-height: 1.05;
   color: var(--el-color-primary);
-  line-height: 1.2;
+  font-variant-numeric: tabular-nums;   /* 数字等宽，刷新时不跳动 */
 }
 
 .stat-value.health-ok {
@@ -338,17 +341,26 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-card, 14px);
+  background: var(--el-fill-color-blank, #fff);
+  box-shadow: var(--shadow-card, 0 1px 3px rgba(0, 0, 0, 0.05));
   cursor: pointer;
-  transition: all 0.3s ease;
+  user-select: none;
+  /* 只动 transform/box-shadow（§11 compositor-friendly）；
+     按压反馈在 :active 即刻生效（§1 pointer-down） */
+  transition: transform 120ms ease-out, box-shadow 120ms ease-out,
+              background-color 120ms ease-out;
+  will-change: transform;
 }
 
 .playlist-item:hover {
-  border-color: var(--el-color-primary);
-  background-color: var(--el-fill-color-light);
   transform: translateY(-2px);
-  box-shadow: var(--el-box-shadow-light);
+  box-shadow: var(--shadow-raised, 0 8px 24px rgba(0, 0, 0, 0.10));
+}
+
+.playlist-item:active {
+  transform: scale(0.97);            /* 按下即缩，不等松手 */
+  box-shadow: var(--shadow-card, 0 1px 3px rgba(0, 0, 0, 0.05));
 }
 
 .playlist-icon {
@@ -364,11 +376,13 @@ onUnmounted(() => {
 .playlist-name {
   font-size: 14px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--el-text-color-primary);
 }
 
 .playlist-desc {
   font-size: 12px;
+  letter-spacing: 0.01em;
   color: var(--el-text-color-secondary);
   margin-top: 2px;
 }
