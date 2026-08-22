@@ -122,9 +122,7 @@ const editingSource = ref({
 const loadSources = async () => {
   try {
     const res = await sourcesApi.list()
-    const streamsRes = await streamsApi.list()
-    
-    const streams = streamsRes.data
+    const streams: any[] = await streamsApi.listAll()
     
     sources.value = res.data.map((source: any) => {
       const sourceStreams = streams.filter((s: any) => 

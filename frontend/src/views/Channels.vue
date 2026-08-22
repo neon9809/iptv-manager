@@ -390,11 +390,11 @@ const loadData = async () => {
   try {
     const [channelsRes, streamsRes, sourcesRes] = await Promise.all([
       channelsApi.list(),
-      streamsApi.list(),
+      streamsApi.listAll(),
       sourcesApi.list(),
     ])
     channels.value = channelsRes.data
-    streams.value = streamsRes.data
+    streams.value = streamsRes
     sources.value = sourcesRes.data
   } catch (error) {
     ElMessage.error('加载数据失败')

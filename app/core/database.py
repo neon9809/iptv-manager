@@ -1,7 +1,7 @@
 import logging
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase
-from sqlalchemy.pool import NullPool
 from app.core.config import get_settings
 
 settings = get_settings()
@@ -11,7 +11,10 @@ engine = create_async_engine(
     settings.DATABASE_URL,
     echo=False,
     pool_pre_ping=True,
-    poolclass=NullPool,
+    pool_size=10,
+    max_overflow=20,
+    pool_recycle=1800,
+    pool_timeout=30,
 )
 
 async_session_maker = async_sessionmaker(
@@ -41,3 +44,8 @@ async def get_db() -> AsyncSession:
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # 轻量列迁移：create_all 不会为已存在的表补加新列，
+        # 这里幂等地补充 tasks.queued_at（僵尸回收基于该时间戳）
+        await conn.execute(text("""
+            ALTER TABLE tasks ADD COLUMN IF NOT EXISTS queued_at TIMESTAMP
+        """))

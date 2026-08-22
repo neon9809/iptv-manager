@@ -29,8 +29,23 @@ export const channelsApi = {
 }
 
 export const streamsApi = {
-  list: (params?: { channel_id?: number; unmatched?: boolean }) =>
+  list: (params?: { channel_id?: number; unmatched?: boolean; limit?: number; offset?: number }) =>
     api.get('/api/v1/streams', { params }),
+  /** 拉取全部流（自动翻页），避免后端默认 limit 截断导致批量操作遗漏 */
+  listAll: async (params?: { channel_id?: number; unmatched?: boolean }) => {
+    const pageSize = 5000
+    let offset = 0
+    const all: any[] = []
+    // 防御性上限：最多拉取 20 万条，避免异常死循环
+    for (let i = 0; i < 40; i++) {
+      const res = await api.get('/api/v1/streams', { params: { ...params, limit: pageSize, offset } })
+      const batch = res.data || []
+      all.push(...batch)
+      if (batch.length < pageSize) break
+      offset += pageSize
+    }
+    return all
+  },
   updateActive: (id: string, active: string) =>
     api.put(`/api/v1/streams/${id}/active`, { active }),
   bindChannel: (streamId: string, channelId: number) =>
@@ -43,7 +58,7 @@ export const streamsApi = {
 
 export const channelBindingApi = {
   createAndBind: (channelName: string, streamIds: string[]) =>
-    api.post('/api/v1/channels/create-and-bind', { channel_name: channelName, stream_ids: streamIds }),
+    api.post('/api/v1/streams/create-channel-bind', { channel_name: channelName, stream_ids: streamIds }),
 }
 
 export const analysisApi = {

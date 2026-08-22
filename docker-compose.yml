@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: iptv_manager
       POSTGRES_USER: iptv_user
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_strong_password}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -36,7 +36,7 @@ services:
       - "8000:8000"
     environment:
       - SERVICE_NAME=backend
-      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/iptv_manager
       - REDIS_URL=redis://redis:6379/0
       - ANALYSIS_FREQUENCY_MINUTES=45
       - ANALYSIS_WORKERS=6
@@ -79,7 +79,7 @@ services:
     container_name: iptv-celery-worker
     environment:
       - SERVICE_NAME=celery-worker
-      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/iptv_manager
       - REDIS_URL=redis://redis:6379/0
       - ANALYSIS_FREQUENCY_MINUTES=45
       - ANALYSIS_WORKERS=6
@@ -108,7 +108,7 @@ services:
     container_name: iptv-celery-beat
     environment:
       - SERVICE_NAME=celery-beat
-      - DATABASE_URL=postgresql+asyncpg://iptv_user:password@postgres:5432/iptv_manager
+      - DATABASE_URL=postgresql+asyncpg://iptv_user:${POSTGRES_PASSWORD:-changeme_strong_password}@postgres:5432/iptv_manager
       - REDIS_URL=redis://redis:6379/0
     volumes:
       - app_data:/app/app/data

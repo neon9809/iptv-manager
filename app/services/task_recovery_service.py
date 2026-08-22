@@ -61,3 +61,83 @@ async def recover_interrupted_tasks():
         except Exception as e:
             logger.error(f"An error occurred during task recovery: {e}", exc_info=True)
             await db.rollback()
+
+
+# QUEUED 任务超过该时长未被 Worker 领取即视为投递丢失
+QUEUED_STALE_SECONDS = 300
+# RUNNING 任务超过该时长无进展即视为僵尸（需大于最长任务时限 7200s）
+RUNNING_STALE_SECONDS = 7500
+
+
+async def recover_stale_tasks():
+    """僵尸任务超时回收（由 Celery Beat 周期调用，不依赖 backend 重启）
+
+    - QUEUED 超时：Celery 投递丢失或 Worker 消费延迟过久 → 重置为 PENDING
+    - RUNNING 超时：Worker 崩溃/OOM 等导致任务卡死 → 标记 FAILED 并解锁占用的流
+
+    解决"仅 Worker 崩溃而后端常驻时，QUEUED/RUNNING 任务永久卡死、
+    占满并发槽位导致整个系统停摆"的问题。
+    """
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    recovered_queued = 0
+    recovered_running = 0
+    unlocked_streams = 0
+
+    async with async_session_maker() as db:
+        try:
+            # 1. QUEUED 超时回收：重置为 PENDING（基于 queued_at，
+            #    避免 PENDING→QUEUED 循环中因 created_at 过旧而被立即再次重置）
+            queued_cutoff = now - timedelta(seconds=QUEUED_STALE_SECONDS)
+            result = await db.execute(
+                update(Task)
+                .where(
+                    Task.status == "QUEUED",
+                    Task.queued_at < queued_cutoff,
+                )
+                .values(status="PENDING", queued_at=None)
+            )
+            recovered_queued = result.rowcount or 0
+
+            # 2. RUNNING 超时回收：标记 FAILED 并解锁流
+            stale_result = await db.execute(
+                select(Task).where(
+                    Task.status == "RUNNING",
+                    Task.started_at < now - timedelta(seconds=RUNNING_STALE_SECONDS),
+                )
+            )
+            stale_tasks = stale_result.scalars().all()
+
+            if stale_tasks:
+                stale_ids = [t.id for t in stale_tasks]
+                logger.warning(f"[Recovery] Found {len(stale_ids)} zombie RUNNING task(s): {stale_ids}")
+
+                unlock_result = await db.execute(
+                    update(Stream)
+                    .where(Stream.current_task_id.in_(stale_ids))
+                    .values(current_task_id=None)
+                )
+                unlocked_streams = unlock_result.rowcount or 0
+
+                await db.execute(
+                    update(Task)
+                    .where(Task.id.in_(stale_ids))
+                    .values(
+                        status="FAILED",
+                        completed_at=now,
+                        result={"error": "Task timed out and was recovered by zombie reaper"},
+                    )
+                )
+                recovered_running = len(stale_ids)
+
+            if recovered_queued or recovered_running:
+                await db.commit()
+                logger.info(
+                    f"[Recovery] Stale task recovery done. "
+                    f"Queued->Pending: {recovered_queued}, Running->Failed: {recovered_running}, "
+                    f"Unlocked streams: {unlocked_streams}"
+                )
+        except Exception as e:
+            logger.error(f"[Recovery] Error during stale task recovery: {e}", exc_info=True)
+            await db.rollback()

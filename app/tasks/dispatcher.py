@@ -14,7 +14,7 @@ import logging
 from datetime import datetime
 
 from celery import shared_task
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from app.core.database import async_session_maker
 from app.models.models import Task
@@ -43,15 +43,21 @@ def _task_type_to_notify_params(task_obj: Task) -> dict:
 @shared_task(name="app.tasks.dispatcher.dispatch_tasks")
 @run_async
 async def dispatch_tasks():
-    """自定义任务分发器 - 实现应用层优先级队列"""
+    """自定义任务分发器 - 实现应用层优先级队列
+
+    使用 SELECT ... FOR UPDATE SKIP LOCKED 抢占式取任务：
+    - 多个调度周期/多实例并发时不会重复读取同一 PENDING 任务
+    - 先 commit（状态置为 QUEUED）再投递 Celery，避免"投递成功但 commit 失败导致重复执行"
+      （若 commit 后投递失败，任务会以 QUEUED 状态被僵尸回收机制超时重置）
+    """
     from app.services.notification_service import notify_analysis_progress
 
     async with async_session_maker() as db:
         max_concurrent = await ConfigService.get_analysis_workers(db)
 
-        # 1. 统计当前正在运行和排队中的任务数
+        # 1. 统计当前正在运行的任务数
         running_count_result = await db.execute(
-            select(func.count(Task.id)).where(Task.status.in_(["RUNNING", "QUEUED"]))
+            select(func.count(Task.id)).where(Task.status == "RUNNING")
         )
         running_count = running_count_result.scalar() or 0
 
@@ -60,27 +66,34 @@ async def dispatch_tasks():
 
         slots_available = max_concurrent - running_count
 
-        # 2. 按优先级降序、创建时间升序获取待处理任务
+        # 2. FOR UPDATE SKIP LOCKED 抢占式获取待处理任务
         pending_result = await db.execute(
             select(Task)
             .where(Task.status == "PENDING")
             .order_by(Task.priority.desc(), Task.created_at.asc())
             .limit(slots_available)
+            .with_for_update(skip_locked=True)
         )
         tasks_to_dispatch = pending_result.scalars().all()
 
         if not tasks_to_dispatch:
             return
 
-        # 3. 分发任务
-        from app.core.celery_app import celery_app
-
-        dispatched = 0
+        # 3. 先置 QUEUED 并 commit，确保状态落库后再投递 Celery
+        now = datetime.utcnow()
         for task_obj in tasks_to_dispatch:
-            try:
-                task_obj.status = "QUEUED"
-                await db.flush()
+            task_obj.status = "QUEUED"
+            task_obj.queued_at = now
 
+        await db.commit()
+
+    # 4. 事务提交后投递到 Celery（此时任务已确定归属本周期，不会重复分发）
+    from app.core.celery_app import celery_app
+
+    dispatched = 0
+    for task_obj in tasks_to_dispatch:
+        try:
+            async with async_session_maker() as db:
                 # 创建"排队中"通知，显示在"最近维护"时间线
                 notify_params = _task_type_to_notify_params(task_obj)
                 try:
@@ -97,48 +110,60 @@ async def dispatch_tasks():
                 except Exception as ne:
                     logger.warning(f"[Dispatcher] Failed to create queued notification for task {task_obj.id}: {ne}")
 
-                # 根据任务类型路由到不同的 Celery 任务和队列
-                if task_obj.task_type == "SINGLE_STREAM_ANALYSIS":
-                    celery_app.send_task(
-                        'app.tasks.analysis.analyze_stream_task',
-                        args=[str(task_obj.id)],
-                        queue='analysis-high',
-                    )
-                elif task_obj.task_type in ("BATCH_ANALYSIS", "AUTO_ANALYSIS"):
-                    celery_app.send_task(
-                        'app.tasks.analysis.batch_analyze_streams_task',
-                        args=[str(task_obj.id)],
-                        queue='analysis',
-                    )
-                elif task_obj.task_type == "SOURCE_REFRESH":
-                    celery_app.send_task(
-                        'app.tasks.scheduled.source_refresh_task',
-                        args=[str(task_obj.id)],
-                        queue='refresh',
-                    )
-                elif task_obj.task_type == "VIDEO_BASIC_ANALYSIS":
-                    celery_app.send_task(
-                        'app.tasks.scheduled.video_basic_analysis_task',
-                        args=[str(task_obj.id)],
-                        queue='refresh',
-                    )
-                else:
-                    logger.warning(f"[Dispatcher] Unknown task type: {task_obj.task_type}")
-                    task_obj.status = "FAILED"
-                    task_obj.result = {"error": f"Unknown task type: {task_obj.task_type}"}
-                    continue
-
-                dispatched += 1
-                logger.info(
-                    f"[Dispatcher] Dispatched task {task_obj.id} "
-                    f"(type={task_obj.task_type}, priority={task_obj.priority})"
+            # 根据任务类型路由到不同的 Celery 任务和队列
+            if task_obj.task_type == "SINGLE_STREAM_ANALYSIS":
+                celery_app.send_task(
+                    'app.tasks.analysis.analyze_stream_task',
+                    args=[str(task_obj.id)],
+                    queue='analysis-high',
                 )
-            except Exception as e:
-                logger.error(f"[Dispatcher] Failed to dispatch task {task_obj.id}: {e}")
-                task_obj.status = "FAILED"
-                task_obj.result = {"error": f"Dispatch failed: {str(e)}"}
+            elif task_obj.task_type in ("BATCH_ANALYSIS", "AUTO_ANALYSIS"):
+                celery_app.send_task(
+                    'app.tasks.analysis.batch_analyze_streams_task',
+                    args=[str(task_obj.id)],
+                    queue='analysis',
+                )
+            elif task_obj.task_type == "SOURCE_REFRESH":
+                celery_app.send_task(
+                    'app.tasks.scheduled.source_refresh_task',
+                    args=[str(task_obj.id)],
+                    queue='refresh',
+                )
+            elif task_obj.task_type == "VIDEO_BASIC_ANALYSIS":
+                celery_app.send_task(
+                    'app.tasks.scheduled.video_basic_analysis_task',
+                    args=[str(task_obj.id)],
+                    queue='refresh',
+                )
+            else:
+                logger.warning(f"[Dispatcher] Unknown task type: {task_obj.task_type}")
+                async with async_session_maker() as db:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_obj.id)
+                        .values(status="FAILED", result={"error": f"Unknown task type: {task_obj.task_type}"})
+                    )
+                    await db.commit()
+                continue
 
-        await db.commit()
+            dispatched += 1
+            logger.info(
+                f"[Dispatcher] Dispatched task {task_obj.id} "
+                f"(type={task_obj.task_type}, priority={task_obj.priority})"
+            )
+        except Exception as e:
+            logger.error(f"[Dispatcher] Failed to dispatch task {task_obj.id}: {e}")
+            # 投递失败：将任务标记为 FAILED（僵尸回收机制也可兜底 QUEUED 超时）
+            try:
+                async with async_session_maker() as db:
+                    await db.execute(
+                        update(Task)
+                        .where(Task.id == task_obj.id, Task.status == "QUEUED")
+                        .values(status="FAILED", result={"error": f"Dispatch failed: {str(e)}"})
+                    )
+                    await db.commit()
+            except Exception as ce:
+                logger.error(f"[Dispatcher] Failed to mark task {task_obj.id} as FAILED: {ce}")
 
-        if dispatched > 0:
-            logger.info(f"[Dispatcher] Dispatched {dispatched} task(s) in this cycle.")
+    if dispatched > 0:
+        logger.info(f"[Dispatcher] Dispatched {dispatched} task(s) in this cycle.")

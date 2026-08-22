@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 # 通知进度更新的最小间隔（每 N 个流更新一次，避免频繁写库）
 NOTIFY_INTERVAL = 5
+# 进度落库节流间隔（每 N 条流写一次 Task.progress，万级流时避免万次事务）
+PROGRESS_INTERVAL = 25
 
 
 @shared_task(bind=True, name="app.tasks.analysis.analyze_stream_task", max_retries=2)
@@ -83,11 +85,24 @@ async def analyze_stream_task(self, task_id: str):
 
         stream_name = stream.name or str(stream_id)
 
-        # 锁定流，更新任务状态为 RUNNING
-        stream.current_task_id = task_obj.id
+        # 原子加锁：仅当流当前无锁时才上锁并置 RUNNING，消除竞态窗口
+        lock_result = await db.execute(
+            update(Stream)
+            .where(Stream.id == stream.id, Stream.current_task_id.is_(None))
+            .values(current_task_id=task_obj.id)
+        )
+        if (lock_result.rowcount or 0) == 0:
+            logger.warning(f"[Task {task_id}] 直播流 {stream_id} 加锁失败（已被其他任务占用），跳过。")
+            task_obj.status = "SKIPPED"
+            task_obj.result = {"error": "Stream is being analyzed by another task"}
+            task_obj.completed_at = datetime.utcnow()
+            await db.commit()
+            return
+
         task_obj.status = "RUNNING"
         task_obj.started_at = datetime.utcnow()
         task_obj.total = 1
+        task_obj.queued_at = None
         await db.commit()
 
         # 通知：开始分析
@@ -239,6 +254,7 @@ async def batch_analyze_streams_task(self, task_id: str):
         task_obj.status = "RUNNING"
         task_obj.started_at = datetime.utcnow()
         task_obj.total = len(stream_ids)
+        task_obj.queued_at = None
         await db.commit()
 
         # 通知：开始批量分析
@@ -255,9 +271,9 @@ async def batch_analyze_streams_task(self, task_id: str):
         except Exception as ne:
             logger.warning(f"[Task {task_id}] 创建开始通知失败: {ne}")
 
-    # 2. 筛选可分析的流并锁定
+    # 2. 筛选可分析的流并原子加锁
     async with async_session_maker() as db:
-        streams_to_analyze = []
+        ids_requested = []
         for sid in stream_ids:
             stream = (await db.execute(select(Stream).where(Stream.id == sid))).scalar_one_or_none()
             if not stream:
@@ -265,16 +281,33 @@ async def batch_analyze_streams_task(self, task_id: str):
             if stream.current_task_id:
                 logger.debug(f"[Task {task_id}] 流 {sid} 正在被其他任务分析，跳过。")
                 continue
-            streams_to_analyze.append((str(stream.id), stream.name or str(stream.id)))
+            ids_requested.append(str(stream.id))
 
-        if streams_to_analyze:
-            ids_only = [s[0] for s in streams_to_analyze]
-            await db.execute(
+        streams_to_analyze = []
+        if ids_requested:
+            # 原子加锁：仅更新当前无锁的流，并按实际影响行数确定归属，
+            # 消除"检查-上锁"两步之间的竞态窗口
+            lock_result = await db.execute(
                 update(Stream)
-                .where(Stream.id.in_(ids_only))
+                .where(Stream.id.in_(ids_requested), Stream.current_task_id.is_(None))
                 .values(current_task_id=task_uuid)
             )
-            await db.commit()
+            locked_ids = lock_result.rowcount or 0
+
+            if locked_ids > 0:
+                locked_rows = await db.execute(
+                    select(Stream.id, Stream.name).where(
+                        Stream.current_task_id == task_uuid
+                    )
+                )
+                for row_id, row_name in locked_rows.all():
+                    streams_to_analyze.append((str(row_id), row_name or str(row_id)))
+
+            skipped = len(ids_requested) - len(streams_to_analyze)
+            if skipped > 0:
+                logger.debug(f"[Task {task_id}] {skipped} 条流因并发竞争未能加锁，跳过。")
+
+        await db.commit()
 
     if not streams_to_analyze:
         async with async_session_maker() as db:
@@ -323,25 +356,27 @@ async def batch_analyze_streams_task(self, task_id: str):
                 completed_count += 1
                 async with lock:
                     current_active -= 1
-                # 更新进度到 Task 表
-                try:
-                    async with async_session_maker() as session:
-                        await session.execute(
-                            update(Task).where(Task.id == task_uuid).values(progress=completed_count)
-                        )
-                        await session.commit()
-
-                        if completed_count % 5 == 0 or completed_count == total_count:
-                            await notify_task_progress(
-                                db=session,
-                                task_id=task_id,
-                                task_name="",
-                                task_type="BATCH_ANALYSIS",
-                                progress=completed_count,
-                                total=total_count,
+                # 进度落库节流：每 PROGRESS_INTERVAL 条或最后一条才写库，
+                # 万级流时避免每条流一次 UPDATE 事务
+                if completed_count % PROGRESS_INTERVAL == 0 or completed_count == total_count:
+                    try:
+                        async with async_session_maker() as session:
+                            await session.execute(
+                                update(Task).where(Task.id == task_uuid).values(progress=completed_count)
                             )
-                except Exception:
-                    pass
+                            await session.commit()
+
+                            if completed_count % 5 == 0 or completed_count == total_count:
+                                await notify_task_progress(
+                                    db=session,
+                                    task_id=task_id,
+                                    task_name="",
+                                    task_type="BATCH_ANALYSIS",
+                                    progress=completed_count,
+                                    total=total_count,
+                                )
+                    except Exception as pe:
+                        logger.warning(f"[Task {task_id}] 更新任务进度失败: {pe}")
 
                 # 按间隔更新通知进度（避免每个流都写库）
                 if completed_count % NOTIFY_INTERVAL == 0 or completed_count == total:
@@ -402,5 +437,12 @@ async def batch_analyze_streams_task(self, task_id: str):
             total=len(streams_to_analyze),
             success=True,
         )
+
+        # 批量分析完成后检查阈值并发送告警通知（不可达率/可用频道/频道全下线）
+        try:
+            from app.services.stream_analyzer import check_thresholds_and_notify
+            await check_thresholds_and_notify(db)
+        except Exception as te:
+            logger.error(f"[Task {task_id}] 阈值检查失败: {te}", exc_info=True)
 
     logger.info(f"[Task {task_id}] 批量分析完成。成功: {success_count}, 失败: {failed_count}")

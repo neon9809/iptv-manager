@@ -53,6 +53,19 @@ async def source_refresh_scheduler():
         result = await db.execute(select(SubscriptionSource))
         sources = result.scalars().all()
 
+        # 一次取回所有活跃 SOURCE_REFRESH 任务的 source_id，内存比对
+        # （消除逐源 JSONB payload 查询的 N+1）
+        active_refresh_result = await db.execute(
+            select(Task.payload["source_id"].as_integer()).where(
+                Task.task_type == "SOURCE_REFRESH",
+                Task.status.in_(["PENDING", "QUEUED", "RUNNING"]),
+                Task.payload["source_id"].isnot(None),
+            )
+        )
+        pending_source_ids = {
+            row[0] for row in active_refresh_result.all() if row[0] is not None
+        }
+
         created_count = 0
         for source in sources:
             needs_refresh = False
@@ -67,13 +80,7 @@ async def source_refresh_scheduler():
             if not needs_refresh:
                 continue
 
-            existing = await db.execute(
-                select(Task).where(
-                    Task.task_type == "SOURCE_REFRESH",
-                    Task.status.in_(["PENDING", "QUEUED", "RUNNING"]),
-                ).filter(Task.payload["source_id"].as_integer() == source.id)
-            )
-            if existing.scalar_one_or_none():
+            if source.id in pending_source_ids:
                 logger.debug(f"[Scheduler] Source {source.id} ('{source.nickname}') already has a pending refresh task.")
                 continue
 
@@ -158,11 +165,25 @@ async def log_cleanup_scheduler():
         try:
             config = (await db.execute(select(SystemConfig).limit(1))).scalar_one_or_none()
             retention_hours = config.log_retention_hours if config else 1
-            
+
             deleted_count = await LogService.cleanup_old_logs(db, retention_hours)
             logger.info(f"[Scheduler] Log cleanup done. Deleted {deleted_count} old log entries.")
         except Exception as e:
             logger.error(f"[Scheduler] Log cleanup failed: {e}")
+
+
+@shared_task(name="app.tasks.scheduled.stale_task_recovery_scheduler")
+@run_async
+async def stale_task_recovery_scheduler():
+    """僵尸任务回收调度器 (心跳)
+
+    周期性回收超时的 QUEUED/RUNNING 任务，确保仅 Worker 崩溃时系统也能自愈，
+    避免任务永久卡死占满并发槽位。
+    """
+    from app.services.task_recovery_service import recover_stale_tasks
+
+    logger.info("[Scheduler] Running stale task recovery...")
+    await recover_stale_tasks()
 
 
 @shared_task(name="app.tasks.scheduled.source_refresh_task")
@@ -183,6 +204,7 @@ async def source_refresh_task(task_id: str):
         source_id = task_obj.payload.get("source_id")
         task_obj.status = "RUNNING"
         task_obj.started_at = datetime.utcnow()
+        task_obj.queued_at = None
         await db.commit()
 
         source = (await db.execute(select(SubscriptionSource).where(SubscriptionSource.id == source_id))).scalar_one_or_none()
@@ -268,6 +290,7 @@ async def video_basic_analysis_task(task_id: str):
         task_obj.status = "RUNNING"
         task_obj.started_at = datetime.utcnow()
         task_obj.total = len(stream_urls)
+        task_obj.queued_at = None
         await db.commit()
 
         source = (await db.execute(select(SubscriptionSource).where(SubscriptionSource.id == source_id))).scalar_one_or_none()

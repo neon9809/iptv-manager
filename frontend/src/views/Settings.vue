@@ -240,8 +240,9 @@
             </el-form-item>
           </el-col>
           <el-col :span="12">
-            <el-form-item label="密码">
-              <el-input v-model="channels.smtp.config.password" type="password" show-password />
+            <el-form-item :label="channels.smtp.config.password_set ? '密码（已保存，留空不修改）' : '密码'">
+              <el-input v-model="channels.smtp.config.password" type="password" show-password
+                :placeholder="channels.smtp.config.password_set ? '••••••••' : ''" />
             </el-form-item>
           </el-col>
         </el-row>
@@ -381,6 +382,7 @@ const channels = ref({
       sender: '',
       username: '',
       password: '',
+      password_set: false,
       use_tls: true,
       tested: false
     }
@@ -496,7 +498,8 @@ const saveChannelConfig = async () => {
         port: channels.value.smtp.config.port,
         sender: channels.value.smtp.config.sender,
         username: channels.value.smtp.config.username,
-        password: channels.value.smtp.config.password,
+        // 安全：仅在用户输入了新密码时才提交，空值表示不修改已保存的密码
+        ...(channels.value.smtp.config.password ? { password: channels.value.smtp.config.password } : {}),
         use_tls: channels.value.smtp.config.use_tls,
         tested: channels.value.smtp.config.tested
       })
@@ -744,7 +747,9 @@ const loadSmtpConfig = async () => {
     channels.value.smtp.config.port = config.port || 587
     channels.value.smtp.config.sender = config.sender || ''
     channels.value.smtp.config.username = config.username || ''
-    channels.value.smtp.config.password = config.password || ''
+    // 安全：后端不再回传明文密码，仅返回是否已设置；输入框留空表示不修改
+    channels.value.smtp.config.password_set = config.password_set || false
+    channels.value.smtp.config.password = ''
     channels.value.smtp.config.use_tls = config.use_tls !== false
     channels.value.smtp.config.tested = config.tested || false
   } catch (error) {

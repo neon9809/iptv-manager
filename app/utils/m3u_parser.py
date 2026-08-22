@@ -2,20 +2,26 @@ import re
 import logging
 import m3u8
 from typing import Optional
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit, urlunsplit, parse_qsl, urlencode
 
 logger = logging.getLogger(__name__)
 
 
 def normalize_url(url: str) -> str:
-    url = url.split('?')[0]
-    url = url.split('#')[0]
-    return url.strip()
+    """规范化 URL 用于哈希去重
+
+    保留 query 参数（许多 IPTV 源靠 token/signature 区分内容），
+    但对参数排序以保证等价 URL 哈希一致；仅去除 fragment。
+    """
+    parts = urlsplit(url.strip())
+    # 对 query 参数按名称排序，使 ?a=1&b=2 与 ?b=2&a=1 哈希一致
+    sorted_query = urlencode(sorted(parse_qsl(parts.query, keep_blank_values=True)))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, sorted_query, ''))
 
 
 def generate_url_hash(url: str, name: str = "") -> str:
     import hashlib
-    # v0.2.1: 唯一标识仅与流地址本身相关，不再包含频道名称
+    # v0.4.6: 哈希包含完整地址（含规范化 query），避免 token 区分的流被误判为同一条
     normalized = normalize_url(url)
     return hashlib.sha256(normalized.encode()).hexdigest()
 
@@ -73,8 +79,8 @@ def parse_m3u_content(m3u_content: str, base_url: str = "") -> list[dict]:
                 if len(parts) > 1:
                     remaining = parts[1]
                     
-                    # 提取所有属性
-                    attr_match = re.search(r'([a-z_-]+)="([^"]*)"', remaining)
+                    # 提取所有属性（支持大写、数字与连字符，如 tvg-ID、tvg-logo2）
+                    attr_match = re.search(r'([\w-]+)="([^"]*)"', remaining)
                     while attr_match:
                         key = attr_match.group(1)
                         value = attr_match.group(2)
@@ -82,11 +88,11 @@ def parse_m3u_content(m3u_content: str, base_url: str = "") -> list[dict]:
                         normalized_key = key.replace('-', '_')
                         current_info[normalized_key] = value
                         remaining = remaining[attr_match.end():]
-                        attr_match = re.search(r'([a-z_-]+)="([^"]*)"', remaining)
+                        attr_match = re.search(r'([\w-]+)="([^"]*)"', remaining)
                     
                     # 移除所有属性后，剩余部分就是频道名称
                     # 首先移除所有属性（包括引号内的内容）
-                    name_part = re.sub(r'[a-z_-]+="[^"]*"\s*', '', remaining).strip()
+                    name_part = re.sub(r'[\w-]+="[^"]*"\s*', '', remaining).strip()
                     # 如果还有逗号，按最后一个逗号分割
                     if ',' in name_part:
                         name_part = name_part.split(',')[-1].strip()

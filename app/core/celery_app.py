@@ -24,6 +24,7 @@ celery_app.conf.task_routes = {
     'app.tasks.dispatcher.dispatch_tasks': {'queue': 'dispatcher'},
     'app.tasks.scheduled.source_refresh_scheduler': {'queue': 'dispatcher'},
     'app.tasks.scheduled.auto_analysis_scheduler': {'queue': 'dispatcher'},
+    'app.tasks.scheduled.stale_task_recovery_scheduler': {'queue': 'dispatcher'},
 }
 
 celery_app.conf.task_queues = (
@@ -65,6 +66,11 @@ celery_app.conf.beat_schedule = {
     'log-cleanup-scheduler': {
         'task': 'app.tasks.scheduled.log_cleanup_scheduler',
         'schedule': 3600.0,
+        'options': {'queue': 'dispatcher'},
+    },
+    'stale-task-recovery-scheduler': {
+        'task': 'app.tasks.scheduled.stale_task_recovery_scheduler',
+        'schedule': 60.0,
         'options': {'queue': 'dispatcher'},
     },
 }

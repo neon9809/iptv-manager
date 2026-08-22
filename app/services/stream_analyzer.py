@@ -3,9 +3,9 @@ import httpx
 import time
 import logging
 from datetime import datetime
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
-from app.models.models import Stream, AnalysisHistory, Channel
+from app.models.models import Stream, AnalysisHistory, Channel, NotificationItem
 from app.core.config import get_settings
 from app.services.notification_service import (
     notify_stream_unreachable_threshold,
@@ -118,7 +118,7 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
     返回: { width, height, fps, codec, bit_depth, color_profile, audio_codec, bitrate_kbps, analysis_failed }
     当所有尝试都失败时，analysis_failed 为 True
     """
-    print(f"[DEBUG] Starting analyze_stream_video_properties for: {stream_url}")
+    logger.debug(f"Starting analyze_stream_video_properties for: {stream_url}")
     
     result = {
         "video_width": None,
@@ -132,7 +132,7 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
         "analysis_failed": False,  # 新增字段，标记分析是否失败
     }
     
-    print(f"[DEBUG] Result dict created")
+    logger.debug(f"Result dict created")
     
     # 重试机制
     for attempt in range(max_retries):
@@ -155,11 +155,11 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
                     '-probesize', '10000000',  # 增加探测大小
                     '-analyzeduration', '10000000',  # 增加分析时长
                 ])
-                print(f"[DEBUG] Using RTP-specific parameters for {stream_url}")
+                logger.debug(f"Using RTP-specific parameters for {stream_url}")
             
             cmd.append(stream_url)
             
-            print(f"[DEBUG] Attempt {attempt + 1}/{max_retries} for {stream_url}")
+            logger.debug(f"Attempt {attempt + 1}/{max_retries} for {stream_url}")
             
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -174,10 +174,10 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
             stdout_text = stdout.decode() if stdout else ""
             
             if stderr_text:
-                print(f"[DEBUG] FFprobe stderr for {stream_url}: {stderr_text[:200]}")
+                logger.debug(f"FFprobe stderr for {stream_url}: {stderr_text[:200]}")
             
             # 记录stdout长度用于调试
-            print(f"[DEBUG] FFprobe stdout length for {stream_url}: {len(stdout_text)} chars")
+            logger.debug(f"FFprobe stdout length for {stream_url}: {len(stdout_text)} chars")
             
             # 检查是否有解码错误但可能仍然有有效数据
             has_decoding_errors = 'non-existing PPS' in stderr_text or 'no frame!' in stderr_text
@@ -185,7 +185,7 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
             # 即使有错误输出，只要返回码为0且stdout有内容，就尝试解析
             # 对于RTP流，即使有解码错误，也可能有有效的流信息
             if proc.returncode != 0 and not stdout_text:
-                print(f"[DEBUG] FFprobe failed for {stream_url}: returncode={proc.returncode}")
+                logger.debug(f"FFprobe failed for {stream_url}: returncode={proc.returncode}")
                 if attempt == max_retries - 1:
                     result["analysis_failed"] = True
                     return result
@@ -193,22 +193,22 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
             
             # 如果有解码错误但stdout有内容，记录警告但继续解析
             if has_decoding_errors and stdout_text:
-                print(f"[DEBUG] FFprobe has decoding errors but may still have valid data for {stream_url}")
+                logger.debug(f"FFprobe has decoding errors but may still have valid data for {stream_url}")
             
             try:
                 data = json.loads(stdout_text)
                 streams_count = len(data.get('streams', []))
-                print(f"[DEBUG] Successfully parsed JSON for {stream_url}, streams count: {streams_count}")
+                logger.debug(f"Successfully parsed JSON for {stream_url}, streams count: {streams_count}")
                 
                 # 如果没有流信息，记录警告
                 if streams_count == 0:
-                    print(f"[DEBUG] No streams found in JSON for {stream_url}")
+                    logger.debug(f"No streams found in JSON for {stream_url}")
                     if attempt == max_retries - 1:
                         result["analysis_failed"] = True
                         return result
                     continue  # 重试
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
-                print(f"[DEBUG] Failed to parse FFprobe JSON for {stream_url}: {e}, stdout preview: {stdout_text[:200]}")
+                logger.debug(f"Failed to parse FFprobe JSON for {stream_url}: {e}, stdout preview: {stdout_text[:200]}")
                 if attempt == max_retries - 1:
                     result["analysis_failed"] = True
                     return result
@@ -254,26 +254,26 @@ async def analyze_stream_video_properties(stream_url: str, timeout: int = 10, ca
                 if bitrate_kbps:
                     result['video_bitrate_kbps'] = bitrate_kbps
             
-            print(f"[DEBUG] Successfully analyzed {stream_url}: {result['video_width']}x{result['video_height']}")
+            logger.debug(f"Successfully analyzed {stream_url}: {result['video_width']}x{result['video_height']}")
             result["analysis_failed"] = False  # 明确标记分析成功
             return result
             
         except asyncio.TimeoutError:
-            print(f"[DEBUG] FFprobe timeout for {stream_url} (attempt {attempt + 1}/{max_retries})")
+            logger.debug(f"FFprobe timeout for {stream_url} (attempt {attempt + 1}/{max_retries})")
             if attempt == max_retries - 1:
                 result["analysis_failed"] = True
-                print(f"[DEBUG] All {max_retries} attempts failed for {stream_url}")
+                logger.debug(f"All {max_retries} attempts failed for {stream_url}")
                 return result
             continue  # 重试
             
         except Exception as e:
-            print(f"[DEBUG] Unexpected error in analyze_stream_video_properties for {stream_url}: {e}")
+            logger.debug(f"Unexpected error in analyze_stream_video_properties for {stream_url}: {e}")
             if attempt == max_retries - 1:
                 result["analysis_failed"] = True
                 return result
             continue  # 重试
     
-    print(f"[DEBUG] All attempts failed for {stream_url}")
+    logger.debug(f"All attempts failed for {stream_url}")
     result["analysis_failed"] = True
     return result
 
@@ -299,8 +299,10 @@ async def calculate_bitrate_with_ffmpeg(stream_url: str, record_duration: int = 
             
             logger.info(f"开始第 {i+1} 次录制")
             
+            # 不使用 -re：-re 会按原生速率限制读取，录制时长被强制拉满，
+            # 纯属多余且拖慢单流分析
             cmd = [
-                'ffmpeg', '-re', '-y', '-i', stream_url,
+                'ffmpeg', '-y', '-i', stream_url,
                 '-t', str(record_duration),
                 '-f', 'null', '-'
             ]
@@ -466,9 +468,9 @@ async def analyze_stream_stability(stream_url: str, duration: int = 3) -> dict:
                 else:
                     hls_health_score = 100.0  # 非HLS流默认健康
                 
-                # 综合稳定性评分: 加权平均
+                # 综合稳定性评分: 加权平均（统一归一化到 0-100 后加权 40/40/20）
                 stability_score = (
-                    connection_stability * 40 +
+                    connection_stability * 100 * 0.4 +
                     continuity_score * 0.4 +
                     hls_health_score * 0.2
                 )
@@ -623,67 +625,118 @@ async def analyze_all_streams(db: AsyncSession, mode: str = "full") -> dict:
     }
 
 
-async def _check_and_send_notifications(db: AsyncSession):
-    """检查各种阈值并发送通知"""
+async def check_thresholds_and_notify(db: AsyncSession):
+    """批量分析完成后检查各类阈值并发送通知（供 batch_analyze_streams_task 调用）
+
+    使用聚合 SQL 实现，避免全表载入内存 + O(C×S) 线性扫描。
+    """
     forgiveness_param = await ConfigService.get_forgiveness_param(db)
 
-    # 获取所有流
-    result = await db.execute(select(Stream))
-    all_streams = result.scalars().all()
+    # 读取通知事项配置（阈值/开关），未配置时使用默认值
+    items_result = await db.execute(
+        select(NotificationItem).where(NotificationItem.key.in_(
+            ["stream_unreachable", "channel_available", "channel_all_down"]
+        ))
+    )
+    item_map = {item.key: item for item in items_result.scalars().all()}
 
-    if not all_streams:
+    def _enabled(key: str) -> bool:
+        item = item_map.get(key)
+        return item.enabled if item else True
+
+    def _threshold(key: str, default: int) -> int:
+        item = item_map.get(key)
+        if item and item.threshold_value is not None:
+            return item.threshold_value
+        return default
+
+    # ---- 聚合统计 1：流级指标（单条 SQL）----
+    stream_stats_result = await db.execute(
+        select(
+            func.count(Stream.id).label("total"),
+            func.sum(
+                case((Stream.unreachable_count > forgiveness_param, 1), else_=0)
+            ).label("unreachable"),
+        )
+    )
+    row = stream_stats_result.one()
+    total_streams = int(row.total or 0)
+    unreachable_count = int(row.unreachable or 0)
+
+    if total_streams == 0:
         return
 
-    # 检查直播流不可达阈值
-    unreachable_streams = [s for s in all_streams if s.unreachable_count > forgiveness_param]
-    unreachable_count = len(unreachable_streams)
-    total_streams = len(all_streams)
-    unreachable_percent = (unreachable_count / total_streams * 100) if total_streams > 0 else 0
-
-    # 如果不可达比例超过30%，发送通知
-    if unreachable_percent >= 30:
-        try:
-            await notify_stream_unreachable_threshold(db, 30, unreachable_count, total_streams)
-        except Exception as e:
-            logger.error(f"Failed to send stream unreachable notification: {e}")
-
-    # 获取所有频道
-    result = await db.execute(select(Channel))
-    all_channels = result.scalars().all()
-
-    if not all_channels:
-        return
-
-    # 检查可用频道阈值
-    available_channels = 0
-    channels_all_down = []
-
-    for channel in all_channels:
-        channel_streams = [s for s in all_streams if s.channel_id == channel.id]
-        if not channel_streams:
-            continue
-
-        # 检查频道是否有可用流
-        available_streams = [s for s in channel_streams
-                            if s.unreachable_count <= forgiveness_param and s.active != "false"]
-
-        if available_streams:
-            available_channels += 1
-        else:
-            # 频道所有线路都不可用
-            channels_all_down.append(channel.standard_name)
+    # 直播流不可达阈值
+    if _enabled("stream_unreachable"):
+        unreachable_percent = unreachable_count / total_streams * 100
+        threshold = _threshold("stream_unreachable", 30)
+        if unreachable_percent >= threshold:
             try:
-                await notify_channel_all_streams_down(db, channel.standard_name)
+                await notify_stream_unreachable_threshold(db, threshold, unreachable_count, total_streams)
+            except Exception as e:
+                logger.error(f"Failed to send stream unreachable notification: {e}")
+
+    # ---- 聚合统计 2：频道级指标（按 channel_id GROUP BY，走 idx_streams_channel）----
+    channel_stats_result = await db.execute(
+        select(
+            Stream.channel_id,
+            func.count(Stream.id).label("total"),
+            func.sum(
+                case(
+                    (
+                        (Stream.unreachable_count <= forgiveness_param) & (Stream.active != "false"),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ).label("available"),
+        )
+        .where(Stream.channel_id.isnot(None))
+        .group_by(Stream.channel_id)
+    )
+    channel_rows = channel_stats_result.all()
+
+    total_channels_with_streams = len(channel_rows)
+    if total_channels_with_streams == 0:
+        return
+
+    available_channels = 0
+    all_down_names: list[str] = []
+
+    # 仅对"全下线"的频道取名称（数量通常极少）
+    all_down_ids = [
+        r.channel_id for r in channel_rows
+        if (r.available or 0) == 0
+    ]
+
+    if _enabled("channel_all_down") and all_down_ids:
+        names_result = await db.execute(
+            select(Channel.id, Channel.standard_name).where(Channel.id.in_(all_down_ids))
+        )
+        id_to_name = {cid: name for cid, name in names_result.all()}
+        for cid in all_down_ids:
+            name = id_to_name.get(cid, f"ID:{cid}")
+            all_down_names.append(name)
+            try:
+                await notify_channel_all_streams_down(db, name)
             except Exception as e:
                 logger.error(f"Failed to send channel all down notification: {e}")
 
-    # 检查可用频道比例
-    total_channel_count = len(all_channels)
-    available_percent = (available_channels / total_channel_count * 100) if total_channel_count > 0 else 0
+    for r in channel_rows:
+        if (r.available or 0) > 0:
+            available_channels += 1
 
-    # 如果可用频道比例低于50%，发送通知
-    if available_percent < 50:
-        try:
-            await notify_available_channels_threshold(db, 50, available_channels, total_channel_count)
-        except Exception as e:
-            logger.error(f"Failed to send available channels notification: {e}")
+    # 可用频道比例阈值
+    if _enabled("channel_available"):
+        available_percent = available_channels / total_channels_with_streams * 100
+        threshold = _threshold("channel_available", 50)
+        if available_percent < threshold:
+            try:
+                await notify_available_channels_threshold(db, threshold, available_channels, total_channels_with_streams)
+            except Exception as e:
+                logger.error(f"Failed to send available channels notification: {e}")
+
+
+async def _check_and_send_notifications(db: AsyncSession):
+    """兼容旧调用入口"""
+    await check_thresholds_and_notify(db)

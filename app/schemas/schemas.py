@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, field_serializer, model_serializer, ConfigDict
+from pydantic import BaseModel, Field, field_serializer, model_serializer, model_validator, ConfigDict
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -162,7 +162,7 @@ class RefreshSourceRequest(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     checks: dict
-    version: str = "0.2.0"
+    version: str = "unknown"
 
 
 class SMTPConfigResponse(BaseModel):
@@ -174,11 +174,24 @@ class SMTPConfigResponse(BaseModel):
     port: int = 587
     sender: Optional[str] = None
     username: Optional[str] = None
-    password: Optional[str] = None
+    # 安全：不向前端回传明文密码，仅返回是否已设置
+    password_set: bool = False
     use_tls: bool = True
     tested: bool = False
     created_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="before")
+    @classmethod
+    def _exclude_password(cls, data):
+        """从 ORM 对象/字典中剔除 password 字段，防止泄露"""
+        if hasattr(data, "__dict__") or isinstance(data, dict):
+            try:
+                if isinstance(data, dict) and "password" in data:
+                    data = {k: v for k, v in data.items() if k != "password"}
+            except Exception:
+                pass
+        return data
 
 
 class SMTPConfigUpdate(BaseModel):

@@ -1,5 +1,7 @@
 import logging
 import asyncio
+import queue
+import threading
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from datetime import datetime, timedelta
@@ -10,16 +12,30 @@ logger = logging.getLogger(__name__)
 
 
 class DatabaseLogHandler(logging.Handler):
-    """自定义日志处理器，将日志写入数据库"""
-    
+    """线程安全的数据库日志处理器
+
+    设计：
+      - emit() 仅做无阻塞入队（queue.Queue 线程安全，可被多线程/多循环并发调用）
+      - 单一后台写线程从队列取日志，通过独立事件循环写入数据库
+      - 队列有界（防内存膨胀），满时丢弃并计数（日志系统故障不应影响业务）
+      - 所有异常记录到标准 logger，不再静默吞掉
+    """
+
+    _MAX_QUEUE_SIZE = 10000
+    _BATCH_SIZE = 100
+    _FLUSH_INTERVAL = 2.0  # 秒：无新日志时的兜底刷新周期
+
     def __init__(self, db_session_factory):
         super().__init__()
         self.db_session_factory = db_session_factory
-        self._queue = []
-        self._flushing = False
+        self._queue: queue.Queue = queue.Queue(maxsize=self._MAX_QUEUE_SIZE)
+        self._dropped = 0
+        self._writer_thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._start_writer_thread()
 
     def emit(self, record):
-        """将日志记录写入数据库"""
+        """将日志记录写入队列（线程安全，永不阻塞、永不抛出）"""
         try:
             msg = self.format(record)
             log_data = {
@@ -32,60 +48,60 @@ class DatabaseLogHandler(logging.Handler):
                     'lineno': record.lineno,
                 }
             }
-            self._queue.append(log_data)
-            self._schedule_flush()
-        except Exception:
-            pass
-
-    def _schedule_flush(self):
-        """调度刷新操作"""
-        if self._flushing:
-            return
-        
-        try:
-            loop = asyncio.get_running_loop()
-            loop.call_soon(self._do_flush)
-        except RuntimeError:
-            self._do_flush_sync()
-
-    def _do_flush(self):
-        """异步刷新日志到数据库"""
-        if not self._queue:
-            self._flushing = False
-            return
-        
-        self._flushing = True
-        logs_to_write = self._queue.copy()
-        self._queue.clear()
-        
-        try:
-            loop = asyncio.get_running_loop()
-            asyncio.ensure_future(self._write_logs_async(logs_to_write), loop=loop)
-        except Exception:
-            pass
-        finally:
-            self._flushing = False
-
-    def _do_flush_sync(self):
-        """同步刷新日志到数据库"""
-        if not self._queue:
-            return
-        
-        logs_to_write = self._queue.copy()
-        self._queue.clear()
-        
-        try:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
             try:
-                loop.run_until_complete(self._write_logs_async(logs_to_write))
-            finally:
-                loop.close()
+                self._queue.put_nowait(log_data)
+            except queue.Full:
+                self._dropped += 1
+                # 每 100 条丢弃才告警一次，避免告警风暴
+                if self._dropped % 100 == 1:
+                    logging.getLogger(__name__).warning(
+                        f"DatabaseLogHandler queue full, dropped {self._dropped} log records total"
+                    )
         except Exception:
-            pass
+            self.handleError(record)
 
-    async def _write_logs_async(self, logs_data):
-        """异步写入日志到数据库"""
+    def _start_writer_thread(self):
+        if self._writer_thread is not None and self._writer_thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop,
+            name="db-log-writer",
+            daemon=True,
+        )
+        self._writer_thread.start()
+
+    def _writer_loop(self):
+        """后台写线程：独立事件循环，批量写库"""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            while not self._stop_event.is_set():
+                batch: list[dict] = []
+                try:
+                    # 阻塞等待第一条（带超时作为兜底刷新周期）
+                    batch.append(self._queue.get(timeout=self._FLUSH_INTERVAL))
+                    # 非阻塞取尽当前积压，凑一批
+                    while len(batch) < self._BATCH_SIZE:
+                        try:
+                            batch.append(self._queue.get_nowait())
+                        except queue.Empty:
+                            break
+                except queue.Empty:
+                    continue
+
+                try:
+                    loop.run_until_complete(self._write_logs_async(batch))
+                except Exception as e:
+                    logging.getLogger(__name__).error(
+                        f"DatabaseLogHandler failed to write {len(batch)} log records: {e}"
+                    )
+        finally:
+            loop.close()
+            asyncio.set_event_loop(None)
+
+    async def _write_logs_async(self, logs_data: list[dict]):
+        """异步批量写入日志到数据库"""
         try:
             async with self.db_session_factory() as db:
                 for log_data in logs_data:
@@ -98,7 +114,7 @@ class DatabaseLogHandler(logging.Handler):
                     db.add(log_entry)
                 await db.commit()
         except Exception as e:
-            pass
+            logging.getLogger(__name__).error(f"DatabaseLogHandler write error: {e}")
 
 
 class LogService:
@@ -188,15 +204,18 @@ class LogService:
         return result.scalar() or 0
 
     @classmethod
-    async def export_logs(cls, db: AsyncSession) -> str:
-        """导出日志为文本格式"""
-        logs = await cls.get_logs(db, limit=10000)
+    async def export_logs(cls, db: AsyncSession, limit: int = 100000) -> str:
+        """导出日志为文本格式（默认上限 10 万条，超出部分截断并在末尾提示）"""
+        logs = await cls.get_logs(db, limit=limit)
         
         lines = []
         for log in logs:
             line = f"[{log.created_at.isoformat()}] [{log.level}] [{log.logger}] {log.message}"
             lines.append(line)
-        
+
+        if len(logs) >= limit:
+            lines.append(f"... [导出已达上限 {limit} 条，更早日志可能被截断或已按保留策略清理]")
+
         return "\n".join(lines)
 
     @classmethod

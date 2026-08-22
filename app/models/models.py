@@ -42,6 +42,7 @@ class Task(Base):
     progress: Mapped[int] = mapped_column(Integer, default=0)
     total: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP, default=datetime.utcnow)
+    queued_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)
     started_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)
     completed_at: Mapped[datetime | None] = mapped_column(TIMESTAMP)
 

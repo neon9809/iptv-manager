@@ -2,7 +2,8 @@ import httpx
 import json
 import logging
 import os
-from sqlalchemy import select
+import re
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.models import Channel, Stream
 from app.core.config import get_settings
@@ -11,6 +12,10 @@ settings = get_settings()
 logger = logging.getLogger(__name__)
 
 LOCAL_ALIAS_FILE = "app/static/channel_alias.json"
+
+# 预编译归一化正则（避免在热路径中反复编译）
+_NORMALIZE_RE = re.compile(r'[^\w\u4e00-\u9fff0-9]')
+_EXTRACT_NUM_RE = re.compile(r'(\d+)$')
 
 
 async def fetch_channel_aliases() -> list[dict]:
@@ -68,7 +73,15 @@ async def import_channel_aliases(db: AsyncSession) -> dict:
     if not aliases_data:
         return {"status": "no_data", "imported": 0}
     
+    # 一次性取回全部频道，内存中按 standard_name 建索引（消除逐条 SELECT）
+    all_channels_result = await db.execute(select(Channel))
+    existing_by_name = {
+        c.standard_name: c for c in all_channels_result.scalars().all()
+    }
+    
     imported = 0
+    updated = 0
+    next_order = len(existing_by_name)
     for idx, item in enumerate(aliases_data):
         name = ""
         aliases = []
@@ -93,10 +106,7 @@ async def import_channel_aliases(db: AsyncSession) -> dict:
         if not name:
             continue
         
-        result = await db.execute(
-            select(Channel).where(Channel.standard_name == name)
-        )
-        existing = result.scalar_one_or_none()
+        existing = existing_by_name.get(name)
         
         if existing:
             existing.aliases = aliases if aliases else []
@@ -108,7 +118,9 @@ async def import_channel_aliases(db: AsyncSession) -> dict:
                 existing.tvg_id = tvg_id
             if group:
                 existing.group_name = group
+            updated += 1
         else:
+            next_order += 1
             channel = Channel(
                 standard_name=name,
                 aliases=aliases if aliases else [],
@@ -116,9 +128,10 @@ async def import_channel_aliases(db: AsyncSession) -> dict:
                 logo_path=logo,
                 tvg_id=tvg_id,
                 group_name=group,
-                order_index=idx + 1
+                order_index=next_order
             )
             db.add(channel)
+            existing_by_name[name] = channel  # 防止同批次重复名重复插入
             imported += 1
     
     await db.commit()
@@ -126,23 +139,20 @@ async def import_channel_aliases(db: AsyncSession) -> dict:
     return {
         "status": "success",
         "imported": imported,
-        "updated": len(aliases_data) - imported
+        "updated": updated
     }
 
 
 def normalize_channel_name(name: str) -> str:
-    import re
     name = name.lower().strip()
     # 保留数字，只去除特殊字符
-    name = re.sub(r'[^\w\u4e00-\u9fff0-9]', '', name)
+    name = _NORMALIZE_RE.sub('', name)
     return name
 
 
 def extract_channel_number(name: str) -> str | None:
     """提取频道名称中的数字部分，如 CCTV1 -> 1, CCTV17 -> 17"""
-    import re
-    # 匹配末尾的数字
-    match = re.search(r'(\d+)$', name)
+    match = _EXTRACT_NUM_RE.search(name)
     if match:
         return match.group(1)
     return None
@@ -193,44 +203,94 @@ async def auto_match_channels(db: AsyncSession) -> dict:
         select(Stream).where(Stream.channel_id == None)
     )
     unmatched_streams = result.scalars().all()
-    
+
     result = await db.execute(select(Channel))
     all_channels = result.scalars().all()
-    
+
+    if not unmatched_streams or not all_channels:
+        return {
+            "matched_streams": 0,
+            "matched_channels": 0,
+            "unmatched": len(unmatched_streams)
+        }
+
+    # 预归一化频道名与别名，构建倒排索引（归一化名 -> channel 列表）
+    # 消除 O(流 × 频道 × 别名) 的暴力正则匹配
+    name_index: dict[str, list] = {}
+    channel_norms: list[tuple] = []  # (channel, norm_name, norm_aliases, num)
+
+    for channel in all_channels:
+        norm_name = normalize_channel_name(channel.standard_name)
+        norm_aliases = [normalize_channel_name(a) for a in (channel.aliases or []) if a]
+        channel_num = extract_channel_number(norm_name)
+        channel_norms.append((channel, norm_name, norm_aliases, channel_num))
+
+        for key in [norm_name] + norm_aliases:
+            if key:
+                name_index.setdefault(key, []).append(channel)
+
     matched_streams = 0
     matched_channels = set()
-    
+    remaining_streams = []
+
+    # 第一轮：倒排索引精确匹配（O(1) 查找）
     for stream in unmatched_streams:
         if not stream.url:
             continue
-        
+
         stream_name = stream.name if stream.name else stream.url.split('/')[-1].split('.')[0]
-        
+        stream_norm = normalize_channel_name(stream_name)
+        stream_num = extract_channel_number(stream_norm)
+
+        candidates = name_index.get(stream_norm)
+        if candidates:
+            # 精确匹配到唯一频道，直接绑定
+            if len(candidates) == 1:
+                stream.channel_id = candidates[0].id
+                matched_streams += 1
+                matched_channels.add(candidates[0].id)
+                continue
+            # 多个候选时，选数字部分一致的
+            best = next(
+                (c for c in candidates
+                 if extract_channel_number(normalize_channel_name(c.standard_name)) == stream_num),
+                candidates[0]
+            )
+            stream.channel_id = best.id
+            matched_streams += 1
+            matched_channels.add(best.id)
+            continue
+
+        remaining_streams.append((stream, stream_name))
+
+    # 第二轮：仅对未精确命中的流做模糊匹配（数量通常很少）
+    for stream, stream_name in remaining_streams:
+        stream_norm = normalize_channel_name(stream_name)
+        stream_num = extract_channel_number(stream_norm)
+
         best_match = None
         best_score = 0.0
-        
-        for channel in all_channels:
+
+        for channel, norm_name, norm_aliases, channel_num in channel_norms:
             score = fuzzy_match_score(channel.standard_name, stream_name)
-            
             if score > best_score:
                 best_score = score
                 best_match = channel
-            
-            if channel.aliases:
-                for alias in channel.aliases:
-                    alias_score = fuzzy_match_score(alias, stream_name)
-                    if alias_score > best_score:
-                        best_score = alias_score
-                        best_match = channel
-        
+
+            for alias, alias_norm in zip(channel.aliases or [], norm_aliases):
+                alias_score = fuzzy_match_score(alias, stream_name)
+                if alias_score > best_score:
+                    best_score = alias_score
+                    best_match = channel
+
         # 只有匹配度足够高（>= 0.8）才自动匹配，否则保持未匹配状态
         if best_match and best_score >= 0.8:
             stream.channel_id = best_match.id
             matched_streams += 1
             matched_channels.add(best_match.id)
-    
+
     await db.commit()
-    
+
     unique_channels = len(matched_channels)
     return {
         "matched_streams": matched_streams,
@@ -255,24 +315,20 @@ async def bind_stream_to_channel(db: AsyncSession, stream_id: str, channel_id: i
 
 
 async def batch_bind_streams(db: AsyncSession, stream_ids: list[str], channel_id: int | None) -> dict:
-    """批量绑定或解绑直播流到频道"""
-    success_count = 0
-    failed_count = 0
-    
-    for stream_id in stream_ids:
-        result = await db.execute(
-            select(Stream).where(Stream.id == stream_id)
-        )
-        stream = result.scalar_one_or_none()
-        
-        if stream:
-            stream.channel_id = channel_id
-            success_count += 1
-        else:
-            failed_count += 1
-    
+    """批量绑定或解绑直播流到频道（单条 UPDATE，消除逐条 SELECT 的 N+1）"""
+    if not stream_ids:
+        return {"success": 0, "failed": 0}
+
+    result = await db.execute(
+        update(Stream)
+        .where(Stream.id.in_(stream_ids))
+        .values(channel_id=channel_id)
+    )
     await db.commit()
-    
+
+    success_count = result.rowcount or 0
+    failed_count = len(stream_ids) - success_count
+
     return {
         "success": success_count,
         "failed": failed_count

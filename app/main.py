@@ -11,6 +11,7 @@ import asyncio
 import logging
 
 from app.core.database import init_db, async_session_maker
+from app.core.config import get_settings
 from app.api.routes import main as main_router
 from app.services.channel_matcher import import_channel_aliases
 from app.services.task_recovery_service import recover_interrupted_tasks
@@ -23,9 +24,16 @@ async def lifespan(app: FastAPI):
     # 初始化数据库
     await init_db()
 
-    # 导入频道别名
-    async with async_session_maker() as db:
-        await import_channel_aliases(db)
+    # 导入频道别名：后台执行，远程拉取失败/超时不阻塞应用启动
+    async def _import_aliases():
+        try:
+            async with async_session_maker() as db:
+                result = await import_channel_aliases(db)
+                logger.info(f"频道别名导入完成: {result}")
+        except Exception as e:
+            logger.warning(f"频道别名导入失败（不影响启动）: {e}")
+
+    asyncio.create_task(_import_aliases())
 
     # 初始化日志系统
     try:
@@ -48,14 +56,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="IPTV Manager",
     description="IPTV Stream Management and Optimization System",
-    version="0.4.5",
+    version=get_settings().APP_VERSION,
     lifespan=lifespan,
 )
 
 app.add_middleware(
     CORSMiddleware,
+    # allow_origins=["*"] 与 allow_credentials=True 规范上互斥；
+    # 同源部署（Nginx 反代）下无需跨域凭证，显式关闭 credentials
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -67,4 +77,4 @@ app.mount("/static", StaticFiles(directory="app/static"), name="static")
 
 @app.get("/")
 async def root():
-    return {"message": "IPTV Manager API", "version": "0.3.0"}
+    return {"message": "IPTV Manager API", "version": get_settings().APP_VERSION}

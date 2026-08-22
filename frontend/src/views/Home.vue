@@ -178,8 +178,7 @@ const loadData = async () => {
     const allChannels = channelsRes.data
     stats.value.totalChannels = allChannels.length
     
-    const streamsRes = await streamsApi.list()
-    const allStreams = streamsRes.data
+    const allStreams: any[] = await streamsApi.listAll()
     stats.value.totalStreams = allStreams.length
     
     const channelIdsWithStreams = new Set(allStreams.map((s: any) => s.channel_id).filter(Boolean))

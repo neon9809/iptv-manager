@@ -13,7 +13,7 @@
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
-from sqlalchemy import select, text, update
+from sqlalchemy import select, text, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from urllib.parse import urlparse
 from datetime import datetime
@@ -86,7 +86,8 @@ async def health_check():
         checks["redis"] = "error"
 
     status = "healthy" if all(v == "ok" for v in checks.values()) else "unhealthy"
-    return HealthResponse(status=status, checks=checks)
+    from app.core.config import get_settings
+    return HealthResponse(status=status, checks=checks, version=get_settings().APP_VERSION)
 
 
 # ========================================
@@ -132,24 +133,27 @@ async def create_source(
     source: SubscriptionSourceCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """创建订阅源并创建刷新任务和视频分析任务"""
-    is_valid, message = await source_manager.validate_subscription_source(source.url)
+    """创建订阅源（异步化：仅创建记录 + 刷新任务，立即返回）
+
+    首次刷新、频道匹配、视频分析全部由 SOURCE_REFRESH 任务异步完成，
+    避免在请求路径中同步下载/解析万级 M3U 导致超时。
+    """
+    # 轻量校验：仅确认 URL 可达且为 M3U 头，不做完整下载解析
+    is_valid, message = await source_manager.validate_subscription_source_light(source.url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=message)
 
     try:
-        new_source, result = await source_manager.add_subscription_source(
+        new_source = await source_manager.create_source_record(
             db,
             source.nickname,
             source.url,
             source.refresh_frequency_hours,
-            analyze_video=True,
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    await channel_matcher.auto_match_channels(db)
-
+    # 创建初始刷新任务（Worker 领取后完成首次刷新 + 匹配）
     refresh_task = Task(
         task_name=f"Initial Refresh: {new_source.nickname}",
         task_type="SOURCE_REFRESH",
@@ -157,19 +161,6 @@ async def create_source(
         payload={"source_id": new_source.id},
     )
     db.add(refresh_task)
-
-    streams_to_analyze = result.get("streams_to_analyze", [])
-    if streams_to_analyze:
-        video_task = Task(
-            task_name=f"Video Analysis: {new_source.nickname}",
-            task_type="VIDEO_BASIC_ANALYSIS",
-            priority=6,
-            payload={
-                "source_id": new_source.id,
-                "stream_urls": streams_to_analyze,
-            },
-        )
-        db.add(video_task)
 
     await db.commit()
 
@@ -266,14 +257,21 @@ async def update_channel_order(
 async def get_streams(
     channel_id: int = None,
     unmatched: bool = False,
+    limit: int = 1000,
+    offset: int = 0,
     db: AsyncSession = Depends(get_db),
 ):
+    # 分页 + 数据库层过滤，避免全表加载（万级流时响应体可达数十 MB）
+    limit = max(1, min(limit, 5000))
+    offset = max(0, offset)
+
     query = select(Stream)
     if unmatched:
         query = query.where(Stream.channel_id == None)
     elif channel_id:
         query = query.where(Stream.channel_id == channel_id)
 
+    query = query.order_by(Stream.created_at).offset(offset).limit(limit)
     result = await db.execute(query)
     streams = result.scalars().all()
 
@@ -423,22 +421,24 @@ async def trigger_analysis(
 
     else:
         # 全局分析 - 不指定 stream_ids，由 batch_analyze_streams_task 自动获取所有活跃流
-        result = await db.execute(select(Stream).where(Stream.active != "false"))
-        streams = result.scalars().all()
-        stream_ids = [str(s.id) for s in streams]
+        # 仅统计数量用于响应，不把全量 id 写入 payload（避免数 MB 的 JSONB）
+        count_result = await db.execute(
+            select(func.count(Stream.id)).where(Stream.active != "false")
+        )
+        total_streams = count_result.scalar() or 0
 
-        if not stream_ids:
+        if total_streams == 0:
             return {"status": "no_streams", "message": "No active streams to analyze"}
 
         new_task = Task(
             task_name="Manual Enhanced Analysis (All Streams)",
             task_type="BATCH_ANALYSIS",
             priority=5,
-            payload={"stream_ids": stream_ids, "mode": request.mode or "full"},
+            payload={"mode": request.mode or "full"},
         )
         db.add(new_task)
         await db.commit()
-        return {"status": "submitted", "task_id": str(new_task.id), "total": len(stream_ids), "mode": request.mode or "full"}
+        return {"status": "submitted", "task_id": str(new_task.id), "total": total_streams, "mode": request.mode or "full"}
 
 
 @router.get("/api/v1/analysis/mode")
@@ -454,7 +454,8 @@ async def set_analysis_mode(data: dict):
     if mode not in ["quick", "full"]:
         raise HTTPException(status_code=400, detail="Invalid mode. Use 'quick' or 'full'")
     redis = await redis_client.get_client()
-    await redis.set("analysis:mode", mode, ex=3600)
+    # 不设置 TTL：分析模式是持久性配置，1 小时后静默回退为 full 属于 Bug
+    await redis.set("analysis:mode", mode)
     return {"mode": mode, "message": f"Analysis mode set to {mode}"}
 
 
@@ -642,6 +643,9 @@ async def update_smtp_config(
         config = SMTPConfigModel()
         db.add(config)
     update_data = config_update.model_dump(exclude_unset=True)
+    # 安全：前端不再持有明文密码，空字符串/None 表示"不修改密码"
+    if "password" in update_data and not update_data["password"]:
+        del update_data["password"]
     for field, value in update_data.items():
         setattr(config, field, value)
     await db.commit()
@@ -655,18 +659,14 @@ async def update_smtp_config(
 
 @router.get("/api/v1/stream-domains")
 async def get_stream_domains(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(select(Stream))
-    streams = result.scalars().all()
-    domains = set()
-    for stream in streams:
-        if stream.url:
-            try:
-                parsed = urlparse(stream.url)
-                if parsed.hostname:
-                    domains.add(parsed.hostname)
-            except (ValueError, AttributeError):
-                pass
-    return {"domains": sorted(list(domains)), "count": len(domains)}
+    # SQL 下推：避免全表加载到内存仅为解析 hostname
+    result = await db.execute(
+        text("SELECT DISTINCT substring(url from '//([^/:]+)') AS domain FROM streams WHERE url IS NOT NULL")
+    )
+    domains = sorted(
+        d for (d,) in result.all() if d
+    )
+    return {"domains": domains, "count": len(domains)}
 
 
 # ========================================
@@ -703,7 +703,7 @@ async def update_system_config(
         setattr(config, field, value)
     await db.commit()
     await db.refresh(config)
-    ConfigService.invalidate_cache()
+    await ConfigService.invalidate_cache(db)
     await LogService.update_logging_status(db)
     return config
 
@@ -720,9 +720,7 @@ async def get_logs(
     db: AsyncSession = Depends(get_db),
 ):
     from app.services.log_service import LogService
-    logs = await LogService.get_logs(db, limit=limit, offset=offset)
-    if level:
-        logs = [log for log in logs if log.level == level]
+    logs = await LogService.get_logs(db, limit=limit, offset=offset, level=level)
     return logs
 
 
@@ -961,37 +959,26 @@ async def import_config(
                 skipped_sources.append({"nickname": nickname, "reason": "订阅源已存在"})
                 continue
             
-            is_valid, message = await source_manager.validate_subscription_source(url)
-            if not is_valid:
-                failed_sources.append({"nickname": nickname, "reason": message})
-                continue
-            
+            # 异步化：仅创建源记录 + 刷新任务，校验/拉取/匹配交给 Worker，
+            # 避免在单请求内逐源完整下载 M3U 导致超时
             try:
-                new_source, result = await source_manager.add_subscription_source(
+                new_source = await source_manager.create_source_record(
                     db,
                     nickname,
                     url,
                     refresh_frequency_hours,
-                    analyze_video=True,
                 )
             except ValueError as e:
                 skipped_sources.append({"nickname": nickname, "reason": str(e)})
                 continue
             
-            await channel_matcher.auto_match_channels(db)
-            
-            streams_to_analyze = result.get("streams_to_analyze", [])
-            if streams_to_analyze:
-                video_task = Task(
-                    task_name=f"Video Analysis: {new_source.nickname}",
-                    task_type="VIDEO_BASIC_ANALYSIS",
-                    priority=6,
-                    payload={
-                        "source_id": new_source.id,
-                        "stream_urls": streams_to_analyze,
-                    },
-                )
-                db.add(video_task)
+            refresh_task = Task(
+                task_name=f"Config Restore Refresh: {new_source.nickname}",
+                task_type="SOURCE_REFRESH",
+                priority=7,
+                payload={"source_id": new_source.id},
+            )
+            db.add(refresh_task)
             
             restored_sources.append(nickname)
     
@@ -999,7 +986,7 @@ async def import_config(
     
     return {
         "status": "success",
-        "message": "配置已恢复",
+        "message": "配置已恢复（订阅源将在后台异步完成首次刷新与频道匹配）",
         "details": {
             "restored_sources": restored_sources,
             "skipped_sources": skipped_sources,
