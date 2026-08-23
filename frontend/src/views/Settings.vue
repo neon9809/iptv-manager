@@ -785,10 +785,16 @@ onMounted(() => {
   }
 }
 
-/* 卡片高度自适应内容；同行两列等高由 el-row 的 flex 拉伸自然实现，
-   不再强制 height:100%（避免矮卡片大片留白与堆叠时贴压） */
+/* 同行两列等高（el-row flex 拉伸 el-col），卡片填满列高避免矮卡片下方大片留白 */
 .settings-card {
   margin-bottom: 0;
+  height: 100%;
+}
+
+/* 卡片 body 弹性填满剩余高度，内容顶部对齐自然分布 */
+.settings-card > :deep(.el-card__body) {
+  flex: 1;
+  overflow: auto;   /* 内容超出时卡片内部滚动而非撑破等高 */
 }
 
 .card-header {
@@ -830,6 +836,14 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  height: 100%;
+}
+
+/* 列表项较少时均匀分布填充卡片空间，避免底部大片空白 */
+.notification-items > .notification-item {
+  flex: 1;
+  min-height: 44px;
+  max-height: 64px;
 }
 
 .notification-item {
