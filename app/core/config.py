@@ -4,7 +4,7 @@ from functools import lru_cache
 
 
 class Settings(BaseSettings):
-    APP_VERSION: str = "0.6.0"
+    APP_VERSION: str = "0.6.1"
 
     DATABASE_URL: str = "postgresql+asyncpg://iptv_user:iptv_pass@localhost:5432/iptv_manager"
     REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/0")
