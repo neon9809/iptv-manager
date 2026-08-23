@@ -2,7 +2,7 @@
   <el-container class="app-container">
     <el-header class="app-header">
       <div class="header-content">
-        <h1 class="logo">📺 IPTV Manager</h1>
+        <h1 class="logo">IPTV Manager</h1>
         <el-menu
           mode="horizontal"
           :router="true"

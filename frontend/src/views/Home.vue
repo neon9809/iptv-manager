@@ -70,28 +70,28 @@
           </template>
           <div class="playlist-grid">
             <div class="playlist-item" @click="copyPlaylist('playfast')">
-              <div class="playlist-icon">📺</div>
+              <div class="playlist-icon"><el-icon><Timer /></el-icon></div>
               <div class="playlist-info">
                 <div class="playlist-name">延迟优先</div>
                 <div class="playlist-desc">最快响应时间</div>
               </div>
             </div>
             <div class="playlist-item" @click="copyPlaylist('playbest')">
-              <div class="playlist-icon">🎬</div>
+              <div class="playlist-icon"><el-icon><Film /></el-icon></div>
               <div class="playlist-info">
                 <div class="playlist-name">画质优先</div>
                 <div class="playlist-desc">最高清晰度</div>
               </div>
             </div>
             <div class="playlist-item" @click="copyPlaylist('playstable')">
-              <div class="playlist-icon">🔒</div>
+              <div class="playlist-icon"><el-icon><Lock /></el-icon></div>
               <div class="playlist-info">
                 <div class="playlist-name">稳定性优先</div>
                 <div class="playlist-desc">最稳定连接</div>
               </div>
             </div>
             <div class="playlist-item" @click="copyPlaylist('playoptimized')">
-              <div class="playlist-icon">⚡</div>
+              <div class="playlist-icon"><el-icon><MagicStick /></el-icon></div>
               <div class="playlist-info">
                 <div class="playlist-name">综合优化</div>
                 <div class="playlist-desc">智能平衡</div>
@@ -133,7 +133,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage } from 'element-plus'
-import { VideoPlay } from '@element-plus/icons-vue'
+import { VideoPlay, Timer, Film, Lock, MagicStick } from '@element-plus/icons-vue'
 import { healthApi, sourcesApi, channelsApi, streamsApi, notificationsApi, analysisApi, systemConfigApi } from '../api'
 
 const notifications = ref<any[]>([])
@@ -364,7 +364,15 @@ onUnmounted(() => {
 }
 
 .playlist-icon {
-  font-size: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-chip, 10px);
+  background: var(--el-color-primary-light-9);
+  color: var(--el-color-primary);
+  font-size: 20px;
   flex-shrink: 0;
 }
 
@@ -429,7 +437,9 @@ onUnmounted(() => {
   }
   
   .playlist-icon {
-    font-size: 24px;
+    width: 34px;
+    height: 34px;
+    font-size: 17px;
   }
   
   .playlist-name {

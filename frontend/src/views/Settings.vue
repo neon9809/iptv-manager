@@ -1,6 +1,6 @@
 <template>
   <div class="settings">
-    <el-row :gutter="20">
+    <el-row :gutter="20" class="settings-row">
       <el-col :xs="24" :sm="24" :md="12">
         <el-card class="settings-card" shadow="hover">
           <template #header>
@@ -86,7 +86,7 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" style="margin-top: 20px">
+    <el-row :gutter="20" class="settings-row">
       <el-col :xs="24" :sm="24" :md="12">
         <el-card class="settings-card" shadow="hover">
           <template #header>
@@ -157,7 +157,7 @@
       </el-col>
     </el-row>
 
-    <el-row :gutter="20" style="margin-top: 20px">
+    <el-row :gutter="20" class="settings-row">
       <el-col :xs="24" :sm="24" :md="24">
         <el-card class="settings-card" shadow="hover">
           <template #header>
@@ -767,9 +767,28 @@ onMounted(() => {
 </script>
 
 <style scoped>
+/* 行间距统一由行容器控制，覆盖所有断点（含 md 堆叠时） */
+.settings-row + .settings-row {
+  margin-top: 20px;
+}
+
+/* 同一行内两列在窄屏堆叠时的垂直间距（el-col 默认无 margin，
+   md 断点 768-992px 堆叠时两卡片会贴压在一起） */
+.settings-row .el-col + .el-col {
+  margin-top: 20px;
+}
+
+/* 桌面端（md+）两列并排，取消列间垂直间距 */
+@media (min-width: 992px) {
+  .settings-row .el-col + .el-col {
+    margin-top: 0;
+  }
+}
+
+/* 卡片高度自适应内容；同行两列等高由 el-row 的 flex 拉伸自然实现，
+   不再强制 height:100%（避免矮卡片大片留白与堆叠时贴压） */
 .settings-card {
   margin-bottom: 0;
-  height: 100%;
 }
 
 .card-header {
@@ -778,6 +797,7 @@ onMounted(() => {
   align-items: center;
   font-weight: 600;
   font-size: 16px;
+  letter-spacing: -0.01em;
 }
 
 .card-header .el-text {
@@ -817,15 +837,19 @@ onMounted(() => {
   justify-content: space-between;
   align-items: center;
   padding: 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-chip, 10px);
+  background: var(--el-fill-color-lighter);
   cursor: pointer;
-  transition: all 0.3s ease;
+  user-select: none;
+  transition: background-color 120ms ease-out, transform 120ms ease-out;
 }
 
 .notification-item:hover {
-  background-color: var(--el-fill-color-light);
-  border-color: var(--el-color-primary);
+  background: var(--el-fill-color-light);
+}
+
+.notification-item:active {
+  transform: scale(0.98);   /* 按压即时反馈（§1） */
 }
 
 .item-main {
@@ -856,8 +880,8 @@ onMounted(() => {
 
 .channel-config-item {
   padding: 12px;
-  border: 1px solid var(--el-border-color);
-  border-radius: 8px;
+  border-radius: var(--radius-chip, 10px);
+  background: var(--el-fill-color-lighter);
 }
 
 .channel-header {
@@ -961,10 +985,6 @@ onMounted(() => {
 }
 
 @media (max-width: 768px) {
-  .settings-card {
-    margin-bottom: 20px;
-  }
-  
   .card-header {
     flex-direction: column;
     align-items: flex-start;
